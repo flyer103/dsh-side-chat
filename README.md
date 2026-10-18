@@ -1,6 +1,6 @@
 # dsh-side-chat
 
-A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI: open the right sidebar from the session header, add the **「侧边会话」** tab, and keep the main conversation untouched — while the side conversation still carries the same agent, the same tools, and **really edits the same workspace files**.
+A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI: open the right sidebar from the session header, add the **Side chat** (「侧边会话」) tab, and keep the main conversation untouched — while the side conversation still carries the same agent, the same tools, and **really edits the same workspace files**.
 
 English | [中文](README.zh.md)
 
@@ -36,7 +36,7 @@ node scripts/install.mjs --profile desktop            # idempotent; never restar
 node scripts/install.mjs --profile desktop --dry-run  # show the plan only
 ```
 
-Then **restart DSH**, open a session, and expand the right sidebar from the session header (**「Open sidebar」** / 「打开侧边栏」). On the sidebar's guide page, click the **「侧边会话」** card; the side chat opens as a native tab in that column. (There is no separate side-chat button and no floating overlay — the entry lives in the right sidebar, also reachable from the tab strip's add control.) Send the first message: the side chat is created on that send and destroyed when you close its tab. Collapsing the sidebar or switching to another tab only pauses it; opening the tab without sending costs nothing.
+Then **restart DSH**, open a session, and expand the right sidebar from the session header (**「Open sidebar」** / 「打开侧边栏」). On the sidebar's guide page, click the **「Side chat」** (「侧边会话」) card; the side chat opens as a native tab in that column. (There is no separate side-chat button and no floating overlay — the entry lives in the right sidebar, also reachable from the tab strip's add control.) Send the first message: the side chat is created on that send and destroyed when you close its tab. Collapsing the sidebar or switching to another tab only pauses it; opening the tab without sending costs nothing.
 
 ## What it does
 
@@ -53,6 +53,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - No `engines.dsh` and no DSH peer dependency are declared, so DSH does not version-gate installation. That is separate from the tested version: newer DSH releases are untested.
 - Web platform only (`dsh.client.platform: web`); no CLI/TUI surface.
 - Node.js `>= 22`; the plugin itself is dependency-free ESM with no `@deepseek-ai/*` imports.
+- UI copy follows the DSH language setting (Settings → General → Language): Chinese and English are built in, and any other language falls back to English. Technical details — host error messages, routes, event and tool names — stay in English.
 
 ## Known limitations
 

@@ -16,6 +16,7 @@ English | [中文](../README.zh.md)
 | Node.js | `>= 22` for the repository and its tests; the plugin has no runtime dependencies |
 | profile | a normal DSH profile such as `desktop` or `web` |
 | services | `webServer`, `agents`, `timer` are required; `sessionPersistence` is used when present |
+| UI language | follows the DSH language setting: `zh` and `en` are built in; other languages fall back to English |
 
 The plugin imports nothing from `@deepseek-ai/*`, so there is no build step and no version
 coupling beyond the DSH APIs above.
@@ -103,10 +104,10 @@ Restart DSH (quit and reopen the Desktop app, or restart the `dsh web` process).
 
 1. Open any session. In the session header, click **「Open sidebar」** (「打开侧边栏」) to
    expand the right sidebar.
-2. The sidebar's guide page lists the **「侧边会话」** card. Click it; the side chat opens as
-   a native tab in that column. If the sidebar already shows other tabs, use the tab strip's
-   add control to open the guide page. No agent or fork work happens yet, and there is no
-   separate side-chat button and no floating overlay.
+2. The sidebar's guide page lists the **「Side chat」/「侧边会话」** card. Click it; the side
+   chat opens as a native tab in that column. If the sidebar already shows other tabs, use
+   the tab strip's add control to open the guide page. No agent or fork work happens yet, and
+   there is no separate side-chat button and no floating overlay.
 3. Send the first message. That send creates the side session: it forks the parent's
    context, injects the boundary message, and starts the agent.
 4. Keep talking, stop a running turn, or close the tab. Collapsing the sidebar or switching
@@ -201,10 +202,12 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 ## Sidebar tab behavior
 
 - The side chat is a native tab type of the right sidebar (`kind: side-chat`): the tab chip
-  reads 「侧边会话」 and the tab body fills that column. There is no floating window, no
-  fixed width, no shadow or mask, and no page overlay.
-- The tab body has a status bar (status dot plus 尚未创建 / 运行中 / 发送中 / 空闲, and
-  「N 条待发送」 while messages queue), the message list, and the composer.
+  reads **Side chat** (「侧边会话」 when DSH is in Chinese) and the tab body fills that
+  column. There is no floating window, no fixed width, no shadow or mask, and no page
+  overlay.
+- The tab body has a status bar (status dot plus the localized status — Not created yet /
+  Running… / Sending… / Idle, or 尚未创建 / 运行中 / 发送中 / 空闲 — and the localized queue
+  count while messages queue), the message list, and the composer.
 - Messages: user bubbles with timestamps; assistant Markdown (reasoning folded, tool calls
   folded with their results); running/thinking indicator; optimistic pending messages;
   error banner. Markdown uses the shell's renderer when available and a built-in fallback
@@ -230,6 +233,23 @@ is expanded, it is the active tab, and the browser tab is visible). It renders
 by token, and the running indicator plus the optimistic pending bubble cover the in-between
 state. Hiding the tab, collapsing the column or hiding the browser tab pauses polling; it
 resumes later from the last seen sequence, so no history is lost.
+
+## Localization
+
+The tab's user-facing copy follows DSH's language setting (Settings → General → Language /
+语言). Chinese and English are built in: choosing 中文 renders the Chinese copy and choosing
+English renders English, without a restart. Switching the language re-renders already-open
+tabs immediately — the tab chip, the sidebar's guide card, the status bar, empty states,
+composer placeholders, fold and tool labels, and error titles all follow. The tab title and
+guide entries are thunks re-read by the sidebar projection, so they switch in place.
+
+Other active languages (for example one added by an external language pack) fall back
+through DSH's locale chain to English, so the tab never shows a raw key or blank copy.
+
+Technical detail stays in English by design: host-returned error messages, routes, event
+and tool names, and tool arguments/output are not translated. An error strip shows the
+localized title on its first line and the untouched host message on a second monospace
+line, which is omitted when it would only repeat the error code.
 
 ## Token cost
 

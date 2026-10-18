@@ -85,6 +85,23 @@ page — the same public path every shipped tab uses (`ctx.sidebarRightTabs.regi
 - Assistant bodies prefer the shell's `MarkdownText`; a lightweight built-in renderer is the
   fallback when that module is unavailable.
 
+## Localization contract (client)
+
+- The panel follows the DSH locale service (`ctx.locale`); the plugin never keeps its own
+  language preference.
+- Namespace: `side-chat`; two dictionaries registered with the untyped single-locale form —
+  `ctx.locale.register(NS, 'zh', ZH)` and `ctx.locale.register(NS, 'en', EN)`. Built-in locale
+  ids are exactly `zh` and `en`; other languages resolve through the DSH fallback chain to
+  `en`, so the plugin implements no fallback of its own.
+- The `zh` and `en` dictionaries must expose the identical key set with non-empty values.
+- Localized surfaces: tab type title, guide entry title/description (thunks, re-read on every
+  projection), tab chip title, status bar, empty state, composer placeholder, send/stop
+  labels, thinking indicator, reasoning/tool fold titles, pending-message state, context and
+  steering tags, and error text keyed by host error code.
+- Not localized (deliberately): host error `message` detail, route paths, tool names, event
+  types, package and slot ids. Host messages are rendered as a monospace technical detail on
+  a second line under the localized error sentence.
+
 ## Boundary prompt (host, exact first line)
 
 The injected user message must start with `Side conversation boundary.`; the panel also

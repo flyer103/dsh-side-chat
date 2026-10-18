@@ -1,6 +1,6 @@
 {
   "name": "@flyer103/dsh-side-chat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH side chat: fork the current session into an ephemeral side conversation that can really edit files, without polluting the main transcript.",
   "type": "module",
   "main": "lib/index.js",
@@ -28,7 +28,8 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-primitives"
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale"
       ],
       "platform": "web"
     }

@@ -1,6 +1,6 @@
 # dsh-side-chat
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI 用的**侧边会话**：从会话头部展开右侧边栏，添加 **「侧边会话」** tab，聊完关掉，主会话完全不受影响——但侧边会话用的是**同一个 agent、同一套工具，并且会真实修改同一工作区的文件**。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI 用的**侧边会话**：从会话头部展开右侧边栏，添加 **侧边会话**（English 界面为 Side chat）tab，聊完关掉，主会话完全不受影响——但侧边会话用的是**同一个 agent、同一套工具，并且会真实修改同一工作区的文件**。
 
 [English](README.md) | 中文
 
@@ -36,7 +36,7 @@ node scripts/install.mjs --profile desktop            # 幂等；不会重启 DS
 node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 ```
 
-然后**重启 DSH**，打开任意会话，从会话头部展开右侧边栏（**「打开侧边栏」/「Open sidebar」**），在边栏的引导页里点 **「侧边会话」** 卡片，侧边会话会作为该栏的一个原生 tab 打开。**没有独立的侧边会话按钮，也没有浮层**：入口就在右侧边栏的引导页（已开其它 tab 时，可用 tab 条上的「+」控件打开引导页）。发送第一条消息——侧边会话在首条消息发送时才创建，关闭 tab 即销毁；收起侧边栏或切到别的 tab 只是暂停，不销毁；只打开 tab 不发送不产生任何会话或开销。
+然后**重启 DSH**，打开任意会话，从会话头部展开右侧边栏（**「打开侧边栏」/「Open sidebar」**），在边栏的引导页里点 **「侧边会话」**（English 界面显示 Side chat）卡片，侧边会话会作为该栏的一个原生 tab 打开。**没有独立的侧边会话按钮，也没有浮层**：入口就在右侧边栏的引导页（已开其它 tab 时，可用 tab 条上的「+」控件打开引导页）。发送第一条消息——侧边会话在首条消息发送时才创建，关闭 tab 即销毁；收起侧边栏或切到别的 tab 只是暂停，不销毁；只打开 tab 不发送不产生任何会话或开销。
 
 ## 它做什么
 
@@ -53,6 +53,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - 本包**未声明** `engines.dsh` / DSH peer 依赖，因此安装时没有版本阻断；这与「已验证版本」是两件事——更新的 DSH 版本未经验证。
 - 仅 Web 平台（`dsh.client.platform: web`），没有 CLI/TUI 界面。
 - Node.js `>= 22`；插件本身是零依赖 ESM，不 import 任何 `@deepseek-ai/*`。
+- 界面文案跟随 DSH 语言设置（Settings → General → Language / 语言）：内置中文与英文；其它语言回退到英文。技术细节——host 错误 message、路由、事件名与工具名——保持英文原文。
 
 ## 已知限制
 

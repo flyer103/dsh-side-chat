@@ -10,18 +10,33 @@ const bundleSource = fs.readFileSync(bundlePath, 'utf8')
 const API_PREFIX = '/side-chat/api/'
 const TYPE_ID = '@flyer103/dsh-side-chat'
 const KIND = 'side-chat'
+const NS = 'side-chat'
+const ERROR_CODES = ['unknown-source', 'not-found', 'empty-prompt', 'create-failed', 'prompt-failed', 'dispose-failed', 'internal']
 
 function createReactStub() {
   const noop = () => {}
-  return {
+  const stub = {
+    subscriptions: [],
     createElement: (type, props, ...children) => ({ type, props: props === null ? {} : props, children }),
     Fragment: 'Fragment',
     useState: (initial) => [typeof initial === 'function' ? initial() : initial, noop],
     useEffect: noop,
     useRef: (initial) => ({ current: initial === undefined ? null : initial }),
     useMemo: (factory) => factory(),
-    useSyncExternalStore: (snapshot) => snapshot()
+    useSyncExternalStore: (subscribe, getSnapshot) => {
+      const entry = { subscribe, getSnapshot, notified: 0, unsubscribe: null }
+      const value = getSnapshot()
+      entry.value = value
+      if (typeof subscribe === 'function') {
+        entry.unsubscribe = subscribe(() => {
+          entry.notified += 1
+        })
+      }
+      stub.subscriptions.push(entry)
+      return value
+    }
   }
+  return stub
 }
 
 function createPrimitivesStub() {
@@ -64,6 +79,72 @@ function createDocumentStub() {
   return { doc, appended }
 }
 
+function createLocaleStub(initial = 'zh') {
+  const dictionaries = new Map()
+  const listeners = new Set()
+  let active = initial
+  let revision = 0
+  function dictionariesOf(namespace) {
+    let byLocale = dictionaries.get(namespace)
+    if (byLocale === undefined) {
+      byLocale = new Map()
+      dictionaries.set(namespace, byLocale)
+    }
+    return byLocale
+  }
+  function lookup(namespace, key) {
+    const byLocale = dictionaries.get(namespace)
+    if (byLocale === undefined) return undefined
+    for (const locale of [active, 'en']) {
+      const value = byLocale.get(locale)
+      if (value !== undefined && value[key] !== undefined) return value[key]
+    }
+    return undefined
+  }
+  return {
+    register(namespace, localeOrDicts, dict) {
+      const pairs = typeof localeOrDicts === 'string' ? [[localeOrDicts, dict]] : Object.entries(localeOrDicts)
+      const byLocale = dictionariesOf(namespace)
+      for (const [locale, entries] of pairs) byLocale.set(locale, entries)
+      revision += 1
+      return () => {
+        for (const [locale, entries] of pairs) {
+          if (byLocale.get(locale) === entries) byLocale.delete(locale)
+        }
+      }
+    },
+    bind(namespace) {
+      return (key, params) => {
+        const template = lookup(namespace, key)
+        const value = template === undefined ? key : template
+        if (params === undefined || params === null) return value
+        return value.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+      }
+    },
+    getSnapshot() {
+      return { active, revision, locales: [] }
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    setLocale(locale) {
+      if (active === locale) return
+      active = locale
+      revision += 1
+      for (const listener of [...listeners]) listener()
+    },
+    getLocale() {
+      return active
+    },
+    dictionary(namespace, locale) {
+      return dictionaries.get(namespace)?.get(locale)
+    }
+  }
+}
+
 function loadBundle(options = {}) {
   const loadCalls = []
   const fakeWindow = {
@@ -87,7 +168,7 @@ function loadBundle(options = {}) {
     throw new Error('Cannot find module: ' + specifier)
   }
   const exportsObject = registration.factory(requireImpl)
-  return { registration, exports: exportsObject }
+  return { registration, exports: exportsObject, react }
 }
 
 function createCtxStub() {
@@ -96,7 +177,9 @@ function createCtxStub() {
   const injected = []
   const tabTypes = []
   const closeHandlers = []
+  const locale = createLocaleStub()
   const ctx = {
+    locale,
     effect(fn) {
       const dispose = fn()
       if (typeof dispose === 'function') disposers.push(dispose)
@@ -126,7 +209,20 @@ function createCtxStub() {
       }
     }
   }
-  return { ctx, disposers, registered, injected, tabTypes, closeHandlers }
+  return { ctx, disposers, registered, injected, tabTypes, closeHandlers, locale }
+}
+
+function applyBundle(exports) {
+  const stub = createCtxStub()
+  const { doc, appended } = createDocumentStub()
+  const previous = globalThis.document
+  globalThis.document = doc
+  try {
+    exports.apply(stub.ctx)
+  } finally {
+    globalThis.document = previous
+  }
+  return { ...stub, doc, appended }
 }
 
 function createSchedulerStub() {
@@ -252,28 +348,48 @@ test('bundle registers the package id and exports the sidebar plugin face', () =
   assert.equal(registration.id, '@flyer103/dsh-side-chat')
   assert.equal(typeof registration.factory, 'function')
   assert.equal(exports.name, 'dsh-side-chat')
-  assert.deepEqual(exports.inject, ['slots', 'sidebarRight', 'sidebarRightTabs'])
+  assert.deepEqual(exports.inject, ['slots', 'sidebarRight', 'sidebarRightTabs', 'locale'])
   assert.equal(typeof exports.apply, 'function')
 })
 
-test('apply registers the sidebar tab type, the tab body slot and the close handler', () => {
+test('zh and en dictionaries share the same non-empty key set', () => {
   const { exports } = loadBundle()
-  const { ctx, registered, injected, tabTypes, closeHandlers } = createCtxStub()
-  const { doc } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
+  const zh = exports.ZH_DICT
+  const en = exports.EN_DICT
+  const zhKeys = Object.keys(zh).sort()
+  const enKeys = Object.keys(en).sort()
+  assert.deepEqual(zhKeys, enKeys)
+  assert.ok(zhKeys.length >= 38, `expected a complete key set, got ${zhKeys.length}`)
+  for (const key of zhKeys) {
+    assert.equal(typeof zh[key], 'string', `zh.${key} must be a string`)
+    assert.notEqual(zh[key].trim(), '', `zh.${key} must not be empty`)
+    assert.equal(typeof en[key], 'string', `en.${key} must be a string`)
+    assert.notEqual(en[key].trim(), '', `en.${key} must not be empty`)
   }
+  assert.equal(exports.LOCALE_NS, NS)
+  assert.match(zh['status.pending'], /\{count\}/)
+  assert.match(en['status.pending'], /\{count\}/)
+})
 
-  assert.deepEqual(injected, ['sidebar.right.pane.tab'])
-  assert.equal(registered.length, 1)
-  const body = registered[0]
+test('apply registers the sidebar tab type, the localized body slot and the close handler', () => {
+  const { exports } = loadBundle()
+  const { registered, injected, tabTypes, closeHandlers, locale } = applyBundle(exports)
+
+  assert.deepEqual(injected, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'])
+  assert.equal(registered.length, 2)
+  const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const title = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title')
+  assert.ok(body !== undefined, 'tab body slot must be registered')
+  assert.ok(title !== undefined, 'tab title slot must be registered')
+  assert.equal(title.options.key, TYPE_ID)
+  assert.equal(title.options.locale, NS)
+  assert.equal(typeof title.component, 'function')
   assert.equal(body.options.name, 'sidebar.right.pane.tab')
   assert.equal(body.options.key, TYPE_ID)
+  assert.equal(body.options.locale, NS)
   assert.equal(typeof body.component, 'function')
+  assert.deepEqual(locale.dictionary(NS, 'zh'), exports.ZH_DICT)
+  assert.deepEqual(locale.dictionary(NS, 'en'), exports.EN_DICT)
 
   assert.equal(tabTypes.length, 1)
   const type = tabTypes[0]
@@ -296,38 +412,163 @@ test('apply registers the sidebar tab type, the tab body slot and the close hand
 
 test('apply no longer registers the header button or the shell overlay', () => {
   const { exports } = loadBundle()
-  const { ctx, registered, injected } = createCtxStub()
-  const { doc } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
-  }
+  const { registered, injected } = applyBundle(exports)
   assert.equal(injected.includes('conversation.session.header.actions'), false)
   assert.equal(injected.includes('shell.overlay'), false)
   assert.equal(registered.some((entry) => entry.options.id === 'side-chat.toggle'), false)
   assert.equal(registered.some((entry) => entry.options.id === 'side-chat.panel'), false)
 })
 
-test('the injected tab body props carry the runtime for the slot session', () => {
+test('the injected tab body props carry the runtime, translator and locale face', () => {
   const { exports } = loadBundle()
-  const { ctx, registered } = createCtxStub()
-  const { doc } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
-  }
-  const inject = registered[0].options.inject
+  const { registered, locale } = applyBundle(exports)
+  const inject = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject
   assert.equal(typeof inject, 'function')
   const props = inject('session-1')
   assert.equal(props.sessionId, 'session-1')
   assert.equal(typeof props.runtime.open, 'function')
   assert.equal(typeof props.runtime.setVisible, 'function')
+  assert.equal(typeof props.t, 'function')
+  assert.equal(props.locale, locale)
+  assert.equal(props.t('status.running'), '运行中')
+})
+
+test('tab title and guide copy follow the active locale through thunks', () => {
+  const { exports } = loadBundle()
+  const { tabTypes, locale, registered } = applyBundle(exports)
+  const type = tabTypes[0]
+  assert.equal(type.title(), '侧边会话')
+  assert.equal(type.guide[0].title(), '侧边会话')
+  assert.ok(type.guide[0].description().startsWith('临时侧边会话'))
+
+  locale.setLocale('en')
+  assert.equal(type.title(), 'Side chat')
+  assert.equal(type.guide[0].title(), 'Side chat')
+  assert.ok(type.guide[0].description().startsWith('Temporary side conversation'))
+
+  const titleComponent = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title').component
+  const titleProps = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1')
+  assert.equal(titleComponent({ t: titleProps.t }).children[0], 'Side chat')
+
+  locale.setLocale('zh')
+  assert.equal(type.title(), '侧边会话')
+  assert.equal(titleComponent({ t: titleProps.t }).children[0], '侧边会话')
+})
+
+test('status, pending, context and error copy follow the active locale', () => {
+  const { exports } = loadBundle()
+  const { registered, locale } = applyBundle(exports)
+  const t = registered[0].options.inject('session-1').t
+  const notCreated = { sessionId: null, running: false, sending: false, pending: [] }
+  const idle = { sessionId: 'side-1', running: false, sending: false, pending: [] }
+  const running = { sessionId: 'side-1', running: true, sending: false, pending: [] }
+  const sending = { sessionId: 'side-1', running: false, sending: true, pending: [] }
+
+  assert.equal(exports.statusLabel(t, notCreated), '尚未创建')
+  assert.equal(exports.statusLabel(t, idle), '空闲')
+  assert.equal(exports.statusLabel(t, running), '运行中')
+  assert.equal(exports.statusLabel(t, sending), '发送中')
+  assert.equal(exports.pendingLabel(t, true), '排队中…')
+  assert.equal(exports.pendingLabel(t, false), '已发送')
+  assert.equal(exports.contextLabel(t, { tag: 'skill', name: 'agent-experience' }), '技能 agent-experience')
+  assert.equal(exports.contextLabel(t, { tag: 'skill' }), '技能')
+  assert.equal(exports.contextLabel(t, { tag: 'generic' }), '上下文')
+  assert.equal(exports.contextLabel(t, { tag: 'not-a-tag' }), '上下文')
+  assert.equal(t('status.pending', { count: 2 }), '2 条待发送')
+  for (const code of ERROR_CODES) {
+    const failure = exports.formatError(t, { code, message: 'raw host detail' })
+    assert.notEqual(failure.title, code, `error.${code} must be localized`)
+    assert.notEqual(failure.title, '')
+    assert.equal(failure.detail, 'raw host detail', 'the raw host message stays as technical detail')
+  }
+  assert.equal(exports.formatError(t, { code: 'create-failed', message: '' }).detail, '')
+  assert.equal(exports.formatError(t, { code: 'create-failed', message: 'create-failed' }).detail, '', 'a message equal to the code is redundant')
+  assert.equal(exports.formatError(t, { code: 'not-a-real-code', message: 'boom' }).title, '出错了')
+  assert.equal(exports.formatError(t, null), null)
+
+  locale.setLocale('en')
+  assert.equal(exports.statusLabel(t, notCreated), 'Not created yet')
+  assert.equal(exports.statusLabel(t, idle), 'Idle')
+  assert.equal(exports.statusLabel(t, running), 'Running…')
+  assert.equal(exports.statusLabel(t, sending), 'Sending…')
+  assert.equal(exports.pendingLabel(t, true), 'Queued…')
+  assert.equal(exports.pendingLabel(t, false), 'Sent')
+  assert.equal(exports.contextLabel(t, { tag: 'skill', name: 'agent-experience' }), 'Skill: agent-experience')
+  assert.equal(exports.contextLabel(t, { tag: 'skill' }), 'Skill')
+  assert.equal(t('status.pending', { count: 2 }), '2 queued')
+  assert.equal(exports.contextLabel(t, { tag: 'not-a-tag' }), 'Context')
+  assert.equal(t('composer.placeholderBlank'), 'Ask anything about this session…')
+  assert.equal(t('composer.send'), 'Send message')
+  assert.equal(t('composer.stop'), 'Stop generating')
+  assert.equal(t('thinking'), 'Thinking…')
+  assert.equal(t('fold.reasoning'), 'Reasoning')
+  assert.equal(t('fold.tools', { count: 2 }), 'Tool calls (2)')
+  assert.equal(t('empty.hint'), 'Enter to send, Shift+Enter for a new line')
+  assert.equal(exports.formatError(t, { code: 'create-failed', message: 'fork failed' }).title, 'Could not create the side conversation')
+  assert.equal(exports.formatError(t, { code: 'not-found', message: 'gone' }).title, 'The side conversation no longer exists (it may have been destroyed)')
+})
+
+test('a mounted tab body re-renders when the locale changes', () => {
+  const { exports, react } = loadBundle()
+  const { registered, locale } = applyBundle(exports)
+  const bodyRegistration = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const inject = bodyRegistration.options.inject
+  const props = inject('session-1')
+  react.subscriptions.length = 0
+  bodyRegistration.component({
+    ...props,
+    sessionId: 'session-1',
+    useTabInfo: () => ({ tab: { visible: true, title: 'tab' } })
+  })
+  const localeSubscription = react.subscriptions.find((entry) => {
+    const value = entry.getSnapshot()
+    return value !== null && typeof value === 'object' && typeof value.revision === 'number'
+  })
+  assert.ok(localeSubscription !== undefined, 'the tab body subscribes to the locale face')
+  const before = localeSubscription.getSnapshot()
+  assert.equal(before.active, 'zh')
+  locale.setLocale('en')
+  assert.equal(localeSubscription.notified, 1, 'a locale switch notifies the mounted component')
+  const after = localeSubscription.getSnapshot()
+  assert.equal(after.active, 'en')
+  assert.notEqual(after.revision, before.revision)
+  assert.equal(props.t('tab.title'), 'Side chat')
+})
+
+test('apply injects the stylesheet with the dsh-side-chat marker and sc- classes only', () => {
+  const { exports } = loadBundle()
+  const { appended } = applyBundle(exports)
+  assert.equal(appended.length, 1)
+  const style = appended[0]
+  assert.equal(style.tagName, 'style')
+  assert.equal(style.dataset.dyn, 'dsh-side-chat')
+  assert.ok(style.textContent.includes('.sc-root'))
+  assert.ok(style.textContent.includes('.sc-statusbar'))
+  assert.ok(style.textContent.includes('.sc-error-detail'))
+  assert.equal(style.textContent.includes('.sc-panel'), false, 'the floating panel root must be gone')
+  assert.equal(style.textContent.includes('position: fixed'), false, 'no floating positioning in the tab body')
+  assert.equal(style.textContent.includes('min(460px'), false, 'no floating width in the tab body')
+  assert.equal(style.textContent.includes('.sc-toggle'), false, 'the header toggle style must be gone')
+  const classTokens = [...style.textContent.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((match) => match[1])
+  assert.ok(classTokens.length > 10)
+  for (const token of classTokens) {
+    assert.ok(token.startsWith('sc-'), `non sc- class in panel CSS: ${token}`)
+  }
+})
+
+test('Chinese characters live only inside the ZH dictionary literal', () => {
+  const cjk = /[\u4e00-\u9fff]/
+  const zhStart = bundleSource.indexOf('const ZH_DICT = {')
+  assert.ok(zhStart > 0, 'ZH_DICT literal must exist')
+  const zhEnd = bundleSource.indexOf('\n    }\n', zhStart)
+  assert.ok(zhEnd > zhStart)
+  assert.ok(cjk.test(bundleSource.slice(zhStart, zhEnd)), 'ZH_DICT must contain the Chinese copy')
+  assert.equal(cjk.test(bundleSource.slice(0, zhStart)), false, 'Chinese must not appear before ZH_DICT')
+  assert.equal(cjk.test(bundleSource.slice(zhEnd)), false, 'Chinese must not appear after ZH_DICT')
+  const enStart = bundleSource.indexOf('const EN_DICT = {')
+  const enEnd = bundleSource.indexOf('\n    }\n', enStart)
+  assert.ok(enStart > 0 && enEnd > enStart)
+  assert.equal(cjk.test(bundleSource.slice(enStart, enEnd)), false, 'EN_DICT must stay free of Chinese')
 })
 
 test('the close handler destroys a created side session through /side-chat/api/close', async () => {
@@ -345,7 +586,7 @@ test('the close handler destroys a created side session through /side-chat/api/c
   globalThis.fetch = fetchImpl
   try {
     exports.apply(ctx)
-    const runtime = registered[0].options.inject('session-1').runtime
+    const runtime = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1').runtime
     runtime.open('session-1')
     runtime.setVisible('session-1', true)
     await runtime.send('session-1', 'hello')
@@ -381,34 +622,6 @@ test('the close handler is a no-op before the side session is created', async ()
   closeHandlers[0].handler('session-1', { kind: KIND })
   await flush()
   assert.equal(calls.length, 0)
-})
-
-test('apply injects the stylesheet with the dsh-side-chat marker and sc- classes only', () => {
-  const { exports } = loadBundle()
-  const { ctx } = createCtxStub()
-  const { doc, appended } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
-  }
-  assert.equal(appended.length, 1)
-  const style = appended[0]
-  assert.equal(style.tagName, 'style')
-  assert.equal(style.dataset.dyn, 'dsh-side-chat')
-  assert.ok(style.textContent.includes('.sc-root'))
-  assert.ok(style.textContent.includes('.sc-statusbar'))
-  assert.equal(style.textContent.includes('.sc-panel'), false, 'the floating panel root must be gone')
-  assert.equal(style.textContent.includes('position: fixed'), false, 'no floating positioning in the tab body')
-  assert.equal(style.textContent.includes('min(460px'), false, 'no floating width in the tab body')
-  assert.equal(style.textContent.includes('.sc-toggle'), false, 'the header toggle style must be gone')
-  const classTokens = [...style.textContent.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((match) => match[1])
-  assert.ok(classTokens.length > 10)
-  for (const token of classTokens) {
-    assert.ok(token.startsWith('sc-'), `non sc- class in panel CSS: ${token}`)
-  }
 })
 
 test('apiPath is rooted at /side-chat/api/', () => {
@@ -494,18 +707,19 @@ test('foldEntries renders assistant blocks and attaches tool results by callId',
   assert.equal(blocks[2].result.isError, false)
 })
 
-test('foldEntries classifies injected context and ignores replacement surfaces', () => {
+test('foldEntries classifies injected context into localizable tags and ignores replacement surfaces', () => {
   const { exports } = loadBundle()
   const entries = [
     userEntry(3, 'hello'),
     userEntry(4, 'skill loaded', { kind: 'skill-invocation', name: 'agent-experience' }),
-    { ...assistantEntry(5, [{ type: 'text', text: 'replaced' }]), surfaceOp: 'replace' },
-    { ...userEntry(6, 'replaced user'), surfaceOp: 'replace' }
+    userEntry(5, 'from another session', { kind: 'session-reference' }),
+    { ...assistantEntry(6, [{ type: 'text', text: 'replaced' }]), surfaceOp: 'replace' },
+    { ...userEntry(7, 'replaced user'), surfaceOp: 'replace' }
   ]
   const nodes = exports.foldEntries(entries, 0)
-  assert.deepEqual(nodes.map((node) => node.kind), ['user', 'context'])
-  assert.equal(nodes[1].tag, '技能 agent-experience')
-  assert.equal(nodes[1].text, 'skill loaded')
+  assert.deepEqual(nodes.map((node) => node.kind), ['user', 'context', 'context'])
+  assert.deepEqual(nodes[1], { kind: 'context', seq: 4, time: 1700000004000, text: 'skill loaded', tag: 'skill', name: 'agent-experience' })
+  assert.equal(nodes[2].tag, 'sessionReference')
 })
 
 test('foldEntries tolerates empty and malformed input', () => {
@@ -650,7 +864,7 @@ test('closing a tab before the first message never calls the host close route', 
   assert.equal(runtime.getState('main-1'), null)
 })
 
-test('create failure surfaces an error row and restores the draft', async () => {
+test('create failure stores a localizable failure record and restores the draft', async () => {
   const fetchStub = createFetchStub({
     create: { ok: false, code: 'create-failed', message: 'fork failed' }
   })
@@ -662,11 +876,11 @@ test('create failure surfaces an error row and restores the draft', async () => 
   assert.equal(state.sessionId, null)
   assert.equal(state.pending.length, 0)
   assert.equal(state.draft, 'hello')
-  assert.equal(state.error, 'fork failed')
+  assert.deepEqual(state.error, { code: 'create-failed', message: 'fork failed', params: {} })
   assert.equal(fetchStub.calls.length, 1)
 })
 
-test('prompt failure keeps the session and reports the error instead of dropping it', async () => {
+test('prompt failure keeps the session and reports a localizable failure instead of dropping it', async () => {
   const fetched = createFetchStub({
     create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
     prompt: { ok: false, code: 'prompt-failed', message: 'agent busy' }
@@ -677,12 +891,12 @@ test('prompt failure keeps the session and reports the error instead of dropping
   await runtime.send('main-1', 'hello')
   const state = runtime.getState('main-1')
   assert.equal(state.sessionId, 'side-1')
-  assert.equal(state.error, 'agent busy')
+  assert.deepEqual(state.error, { code: 'prompt-failed', message: 'agent busy', params: {} })
   assert.equal(state.pending.length, 0)
   assert.equal(state.draft, 'hello')
 })
 
-test('a not-found snapshot stops polling and shows the polling error', async () => {
+test('a not-found snapshot stops polling and records the polling failure', async () => {
   const fetched = createFetchStub({
     create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
     prompt: { ok: true },
@@ -695,7 +909,7 @@ test('a not-found snapshot stops polling and shows the polling error', async () 
   assert.ok(scheduler.pending() >= 1)
   await runtime.pollOnce('main-1')
   const state = runtime.getState('main-1')
-  assert.equal(state.pollError, 'unknown side session')
+  assert.deepEqual(state.pollError, { code: 'not-found', message: 'unknown side session', params: {} })
   assert.equal(scheduler.pending(), 0, 'not-found must stop the poll loop')
 })
 
@@ -750,14 +964,8 @@ test('fallback markdown covers code fences, headings, lists, tables and inline m
 
 test('bundle also materializes when the primitives seed module is present', () => {
   const { exports } = loadBundle({ primitives: true })
-  const { ctx } = createCtxStub()
-  const { doc } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
-  }
+  const { registered } = applyBundle(exports)
   assert.equal(typeof exports.foldEntries, 'function')
+  const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  assert.equal(body.options.locale, NS)
 })
