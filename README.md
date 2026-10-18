@@ -6,6 +6,7 @@ English | [中文](README.zh.md)
 
 [![CI](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml/badge.svg)](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/flyer103/dsh-side-chat)](https://github.com/flyer103/dsh-side-chat/releases)
+[![npm](https://img.shields.io/npm/v/@flyer103/dsh-side-chat)](https://www.npmjs.com/package/@flyer103/dsh-side-chat)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Why this plugin
@@ -22,13 +23,19 @@ Forking a conversation is easy. Letting the fork *do work* is the part most side
 ## Quick start
 
 ```bash
+# npm (recommended)
+dsh plugin --profile desktop add @flyer103/dsh-side-chat
+
+# GitHub, default branch or a pinned tag
+dsh plugin --profile desktop add github:flyer103/dsh-side-chat
+dsh plugin --profile desktop add github:flyer103/dsh-side-chat#v0.3.1
+
 # local checkout (records a link: dependency)
 cd /path/to/dsh-side-chat
 dsh plugin --profile desktop add "$(pwd)"
 
-# or GitHub (push the repo to GitHub first) / a tarball built with `npm pack`
-dsh plugin --profile desktop add github:flyer103/dsh-side-chat
-dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.1.0.tgz
+# tarball built with `npm pack`
+dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.3.1.tgz
 ```
 
 Use the profile you actually run: `desktop` for the Desktop app, `web` for a web profile. Prefer quitting the Desktop app before installing into `desktop` (the CLI waits on the profile write lock) and reopen it afterwards; either way a restart is required. `add` also appends the bundle to the profile's `dsh.profile.bundles`; you do not edit the profile's `cordis.patch.yml` by hand. Re-running is safe.
