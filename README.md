@@ -1,0 +1,92 @@
+# dsh-side-chat
+
+A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI: click a button in the session header, talk in a floating right-hand panel, and keep the main conversation untouched — while the side conversation still carries the same agent, the same tools, and **really edits the same workspace files**.
+
+English | [中文](README.zh.md)
+
+## Why this plugin
+
+Forking a conversation is easy. Letting the fork *do work* is the part most side-chat plugins avoid. This one inherits the parent's preset and permissions and explicitly allows real mutations, so it is useful for "quickly change this file", "try that fix", or "look into the log" bursts without derailing the main session.
+
+| Plugin | Can edit files | Inherits in-flight context | Ephemeral |
+|---|---|---|---|
+| `Lukknow0/dsh-side-chat` | no — read-only Q&A | yes | yes |
+| `Diluka/dsh-side-session` | no — prompt forbids mutations | yes (live-log snapshot) | yes |
+| `Yur0918/dsh-sidepanel` | no — read-only persona side chat | fork only | no — replays after refresh |
+| **`flyer103/dsh-side-chat`** | **yes — full tool chain in the same workspace** | **yes** | **yes** |
+
+## Quick start
+
+```bash
+# local checkout (records a link: dependency)
+cd /path/to/dsh-side-chat
+dsh plugin --profile desktop add "$(pwd)"
+
+# or GitHub (push the repo to GitHub first) / a tarball built with `npm pack`
+dsh plugin --profile desktop add github:flyer103/dsh-side-chat
+dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.1.0.tgz
+```
+
+Use the profile you actually run: `desktop` for the Desktop app, `web` for a web profile. Prefer quitting the Desktop app before installing into `desktop` (the CLI waits on the profile write lock) and reopen it afterwards; either way a restart is required. `add` also appends the bundle to the profile's `dsh.profile.bundles`; you do not edit the profile's `cordis.patch.yml` by hand. Re-running is safe.
+
+Alternatively, from a local checkout:
+
+```bash
+node scripts/install.mjs --profile desktop            # idempotent; never restarts DSH
+node scripts/install.mjs --profile desktop --dry-run  # show the plan only
+```
+
+Then **restart DSH**, open a session, click **「侧边会话」** in the session header, and send the first message. The side chat is created on that first send and destroyed when you close the panel. Opening the panel and closing it without sending costs nothing.
+
+## What it does
+
+- **Inherits context** — the parent's completed turns plus a snapshot of what the main session is doing right now.
+- **Inherits the agent** — same working directory, preset composition, tools, skills, model routing, sandbox mode and approval policy.
+- **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
+- **Isolates the transcript** — side-chat turns never appear in the main conversation, the session list, or the subagent catalog.
+- **Destroys on close** — the agent is disposed and the host tries to remove its persisted artifact; a side chat cannot be reopened.
+
+## Compatibility
+
+- DSH `0.2.1-rc.2` (Desktop profile, Web GUI) — the tested target. Verified in an isolated copy of the desktop profile: the plugin launches, all seven host routes answer, and the client bundle is served.
+- No `engines.dsh` and no DSH peer dependency are declared, so DSH does not version-gate installation. That is separate from the tested version: newer DSH releases are untested.
+- Web platform only (`dsh.client.platform: web`); no CLI/TUI surface.
+- Node.js `>= 22`; the plugin itself is dependency-free ESM with no `@deepseek-ai/*` imports.
+
+## Known limitations
+
+- Approval prompts are not shown inside the panel: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
+- P1, designed but not implemented: model picker, multiple side chats per session, surviving a GUI restart, approval rendering in the panel.
+- The inherited context is a snapshot taken at creation; later main-session turns are not pushed into an existing side chat.
+- Replies are not token-streamed: an assistant message appears when it commits, with a running indicator in between.
+- The first side-chat request is roughly as large as the parent's next request (it carries the inherited history).
+
+## Documentation
+
+- [docs/USAGE.md](docs/USAGE.md) — full semantics: inheritance, isolation, mutation, lifecycle, installation, rollback, troubleshooting.
+- [docs/DESIGN.md](docs/DESIGN.md) — scope, phases and adversarial notes.
+- [docs/CONTRACT.md](docs/CONTRACT.md) — host routes, client slots and rendering contract.
+- [docs/API-NOTES.md](docs/API-NOTES.md) — the DSH `0.2.1-rc.2` API findings behind the implementation.
+
+## Repository layout
+
+| path | role |
+|---|---|
+| `lib/index.js` | host half: routes, fork seed, boundary injection, close/dispose |
+| `lib/client.js` | client half: header button and floating overlay panel |
+| `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` row |
+| `scripts/install.mjs` | idempotent installer/remover for a local checkout |
+| `dsh.plugin.json` | community manifest metadata; DSH does not read it (official display metadata comes from `package.json` and optional `locale/*.json`) |
+| `tests/` | `node --test` unit tests |
+
+## Uninstall
+
+```bash
+dsh plugin --profile desktop remove @flyer103/dsh-side-chat
+```
+
+Then restart DSH. No transcript, schema or workspace data is migrated or deleted; side chats are ephemeral.
+
+## License
+
+MIT

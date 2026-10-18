@@ -1,0 +1,16 @@
+{
+  "id": "dsh-side-chat",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "Side chat for the DSH Web GUI: fork the current session into an ephemeral conversation that can really edit files in the same workspace, without polluting the main transcript.",
+  "contributes": {
+    "tools": [],
+    "skills": []
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/flyer103/dsh-side-chat",
+  "testedWith": {
+    "dsh": "0.2.1-rc.2",
+    "note": "metadata only; DSH 0.2.1 does not read this file and enforces nothing from it"
+  }
+}
