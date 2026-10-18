@@ -1,6 +1,6 @@
 # dsh-side-chat
 
-A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI: click a button in the session header, talk in a floating right-hand panel, and keep the main conversation untouched — while the side conversation still carries the same agent, the same tools, and **really edits the same workspace files**.
+A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI: open the right sidebar from the session header, add the **「侧边会话」** tab, and keep the main conversation untouched — while the side conversation still carries the same agent, the same tools, and **really edits the same workspace files**.
 
 English | [中文](README.zh.md)
 
@@ -36,15 +36,16 @@ node scripts/install.mjs --profile desktop            # idempotent; never restar
 node scripts/install.mjs --profile desktop --dry-run  # show the plan only
 ```
 
-Then **restart DSH**, open a session, click **「侧边会话」** in the session header, and send the first message. The side chat is created on that first send and destroyed when you close the panel. Opening the panel and closing it without sending costs nothing.
+Then **restart DSH**, open a session, and expand the right sidebar from the session header (**「Open sidebar」** / 「打开侧边栏」). On the sidebar's guide page, click the **「侧边会话」** card; the side chat opens as a native tab in that column. (There is no separate side-chat button and no floating overlay — the entry lives in the right sidebar, also reachable from the tab strip's add control.) Send the first message: the side chat is created on that send and destroyed when you close its tab. Collapsing the sidebar or switching to another tab only pauses it; opening the tab without sending costs nothing.
 
 ## What it does
 
+- **Native sidebar tab** — lives in the session's right sidebar next to the other tabs; no standalone button and no floating overlay.
 - **Inherits context** — the parent's completed turns plus a snapshot of what the main session is doing right now.
 - **Inherits the agent** — same working directory, preset composition, tools, skills, model routing, sandbox mode and approval policy.
 - **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
 - **Isolates the transcript** — side-chat turns never appear in the main conversation, the session list, or the subagent catalog.
-- **Destroys on close** — the agent is disposed and the host tries to remove its persisted artifact; a side chat cannot be reopened.
+- **Destroys on close** — closing the tab disposes the agent and the host tries to remove its persisted artifact; a side chat cannot be reopened. Collapsing the sidebar or switching tabs only pauses it.
 
 ## Compatibility
 
@@ -55,8 +56,10 @@ Then **restart DSH**, open a session, click **「侧边会话」** in the sessio
 
 ## Known limitations
 
-- Approval prompts are not shown inside the panel: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
-- P1, designed but not implemented: model picker, multiple side chats per session, surviving a GUI restart, approval rendering in the panel.
+- Approval prompts are not shown inside the side-chat tab: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
+- One side-chat tab per parent session and sidebar pane; opening the guide card again focuses that tab.
+- A closed tab cannot be restored: reopening the card starts a new side chat, whose agent is created on the next message.
+- P1, designed but not implemented: model picker, multiple side chats per session, surviving a GUI restart, approval rendering in the tab.
 - The inherited context is a snapshot taken at creation; later main-session turns are not pushed into an existing side chat.
 - Replies are not token-streamed: an assistant message appears when it commits, with a running indicator in between.
 - The first side-chat request is roughly as large as the parent's next request (it carries the inherited history).
@@ -65,7 +68,7 @@ Then **restart DSH**, open a session, click **「侧边会话」** in the sessio
 
 - [docs/USAGE.md](docs/USAGE.md) — full semantics: inheritance, isolation, mutation, lifecycle, installation, rollback, troubleshooting.
 - [docs/DESIGN.md](docs/DESIGN.md) — scope, phases and adversarial notes.
-- [docs/CONTRACT.md](docs/CONTRACT.md) — host routes, client slots and rendering contract.
+- [docs/CONTRACT.md](docs/CONTRACT.md) — host routes, Sidebar tab integration and rendering contract.
 - [docs/API-NOTES.md](docs/API-NOTES.md) — the DSH `0.2.1-rc.2` API findings behind the implementation.
 
 ## Repository layout
@@ -73,7 +76,7 @@ Then **restart DSH**, open a session, click **「侧边会话」** in the sessio
 | path | role |
 |---|---|
 | `lib/index.js` | host half: routes, fork seed, boundary injection, close/dispose |
-| `lib/client.js` | client half: header button and floating overlay panel |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, and the tab body (messages + composer) |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` row |
 | `scripts/install.mjs` | idempotent installer/remover for a local checkout |
 | `dsh.plugin.json` | community manifest metadata; DSH does not read it (official display metadata comes from `package.json` and optional `locale/*.json`) |

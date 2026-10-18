@@ -8,6 +8,8 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const bundlePath = path.join(here, '..', 'lib', 'client.js')
 const bundleSource = fs.readFileSync(bundlePath, 'utf8')
 const API_PREFIX = '/side-chat/api/'
+const TYPE_ID = '@flyer103/dsh-side-chat'
+const KIND = 'side-chat'
 
 function createReactStub() {
   const noop = () => {}
@@ -92,6 +94,8 @@ function createCtxStub() {
   const disposers = []
   const registered = []
   const injected = []
+  const tabTypes = []
+  const closeHandlers = []
   const ctx = {
     effect(fn) {
       const dispose = fn()
@@ -108,9 +112,21 @@ function createCtxStub() {
         registered.push({ options, component })
         return () => {}
       }
+    },
+    sidebarRightTabs: {
+      register(definition) {
+        tabTypes.push(definition)
+        return () => {}
+      }
+    },
+    sidebarRight: {
+      registerCloseHandler(kind, handler) {
+        closeHandlers.push({ kind, handler })
+        return () => {}
+      }
     }
   }
-  return { ctx, disposers, registered, injected }
+  return { ctx, disposers, registered, injected, tabTypes, closeHandlers }
 }
 
 function createSchedulerStub() {
@@ -166,6 +182,10 @@ function createRuntimeWith(fetchStub) {
     pollIdleMs: 5
   })
   return { exports, scheduler, runtime }
+}
+
+function flush() {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 function userEntry(seq, text, source = { kind: 'user' }) {
@@ -227,19 +247,19 @@ function toolResultEntry(seq, callId, text, isError = false) {
   }
 }
 
-test('bundle registers the package id and exports the Cordis plugin face', () => {
+test('bundle registers the package id and exports the sidebar plugin face', () => {
   const { registration, exports } = loadBundle()
   assert.equal(registration.id, '@flyer103/dsh-side-chat')
   assert.equal(typeof registration.factory, 'function')
   assert.equal(exports.name, 'dsh-side-chat')
-  assert.deepEqual(exports.inject, ['slots'])
+  assert.deepEqual(exports.inject, ['slots', 'sidebarRight', 'sidebarRightTabs'])
   assert.equal(typeof exports.apply, 'function')
 })
 
-test('apply registers both contract slots with their ids and order', () => {
+test('apply registers the sidebar tab type, the tab body slot and the close handler', () => {
   const { exports } = loadBundle()
-  const { ctx, registered, injected } = createCtxStub()
-  const { doc, appended } = createDocumentStub()
+  const { ctx, registered, injected, tabTypes, closeHandlers } = createCtxStub()
+  const { doc } = createDocumentStub()
   const previous = globalThis.document
   globalThis.document = doc
   try {
@@ -247,23 +267,123 @@ test('apply registers both contract slots with their ids and order', () => {
   } finally {
     globalThis.document = previous
   }
-  assert.deepEqual(injected, ['conversation.session.header.actions', 'shell.overlay'])
-  assert.equal(registered.length, 2)
-  const toggle = registered.find((entry) => entry.options.id === 'side-chat.toggle')
-  const panel = registered.find((entry) => entry.options.id === 'side-chat.panel')
-  assert.ok(toggle !== undefined, 'toggle slot must be registered')
-  assert.ok(panel !== undefined, 'panel slot must be registered')
-  assert.equal(toggle.options.name, 'conversation.session.header.actions')
-  assert.equal(toggle.options.order, 200)
-  assert.equal(toggle.options.label, '侧边会话')
-  assert.equal(panel.options.name, 'shell.overlay')
-  assert.equal(panel.options.order, 200)
-  assert.equal(panel.options.label, '侧边会话面板')
-  assert.equal(typeof toggle.component, 'function')
-  assert.equal(typeof panel.component, 'function')
+
+  assert.deepEqual(injected, ['sidebar.right.pane.tab'])
+  assert.equal(registered.length, 1)
+  const body = registered[0]
+  assert.equal(body.options.name, 'sidebar.right.pane.tab')
+  assert.equal(body.options.key, TYPE_ID)
+  assert.equal(typeof body.component, 'function')
+
+  assert.equal(tabTypes.length, 1)
+  const type = tabTypes[0]
+  assert.equal(type.id, TYPE_ID)
+  assert.equal(type.kind, KIND)
+  assert.equal(type.priority, 'extension')
+  assert.equal(type.keepMounted, true)
+  assert.equal(type.title(), '侧边会话')
+  assert.equal(type.multiple, undefined)
+  assert.equal(type.guide.length, 1)
+  assert.equal(type.guide[0].id, 'side-chat')
+  assert.equal(type.guide[0].order, 10)
+  assert.equal(type.guide[0].title(), '侧边会话')
+  assert.ok(type.guide[0].description().includes('关闭即销毁'))
+
+  assert.equal(closeHandlers.length, 1)
+  assert.equal(closeHandlers[0].kind, KIND)
+  assert.equal(typeof closeHandlers[0].handler, 'function')
 })
 
-test('apply injects the panel stylesheet with the dsh-side-chat marker and sc- classes only', () => {
+test('apply no longer registers the header button or the shell overlay', () => {
+  const { exports } = loadBundle()
+  const { ctx, registered, injected } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const previous = globalThis.document
+  globalThis.document = doc
+  try {
+    exports.apply(ctx)
+  } finally {
+    globalThis.document = previous
+  }
+  assert.equal(injected.includes('conversation.session.header.actions'), false)
+  assert.equal(injected.includes('shell.overlay'), false)
+  assert.equal(registered.some((entry) => entry.options.id === 'side-chat.toggle'), false)
+  assert.equal(registered.some((entry) => entry.options.id === 'side-chat.panel'), false)
+})
+
+test('the injected tab body props carry the runtime for the slot session', () => {
+  const { exports } = loadBundle()
+  const { ctx, registered } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const previous = globalThis.document
+  globalThis.document = doc
+  try {
+    exports.apply(ctx)
+  } finally {
+    globalThis.document = previous
+  }
+  const inject = registered[0].options.inject
+  assert.equal(typeof inject, 'function')
+  const props = inject('session-1')
+  assert.equal(props.sessionId, 'session-1')
+  assert.equal(typeof props.runtime.open, 'function')
+  assert.equal(typeof props.runtime.setVisible, 'function')
+})
+
+test('the close handler destroys a created side session through /side-chat/api/close', async () => {
+  const { exports } = loadBundle()
+  const { ctx, registered, closeHandlers } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const { fetchImpl, calls } = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    close: { ok: true }
+  })
+  const previousDocument = globalThis.document
+  const previousFetch = globalThis.fetch
+  globalThis.document = doc
+  globalThis.fetch = fetchImpl
+  try {
+    exports.apply(ctx)
+    const runtime = registered[0].options.inject('session-1').runtime
+    runtime.open('session-1')
+    runtime.setVisible('session-1', true)
+    await runtime.send('session-1', 'hello')
+    assert.equal(runtime.getState('session-1').sessionId, 'side-1')
+    const closeCallsBeforeHandler = calls.length
+    closeHandlers[0].handler('session-1', { kind: KIND })
+    await flush()
+    assert.equal(calls.length, closeCallsBeforeHandler + 1)
+    assert.equal(calls.at(-1).url, `${API_PREFIX}close`)
+    assert.equal(calls.at(-1).body.sessionId, 'side-1')
+    assert.equal(runtime.getState('session-1'), null)
+  } finally {
+    globalThis.document = previousDocument
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('the close handler is a no-op before the side session is created', async () => {
+  const { exports } = loadBundle()
+  const { ctx, closeHandlers } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const { fetchImpl, calls } = createFetchStub({})
+  const previousDocument = globalThis.document
+  const previousFetch = globalThis.fetch
+  globalThis.document = doc
+  globalThis.fetch = fetchImpl
+  try {
+    exports.apply(ctx)
+  } finally {
+    globalThis.document = previousDocument
+    globalThis.fetch = previousFetch
+  }
+  closeHandlers[0].handler('session-1', { kind: KIND })
+  await flush()
+  assert.equal(calls.length, 0)
+})
+
+test('apply injects the stylesheet with the dsh-side-chat marker and sc- classes only', () => {
   const { exports } = loadBundle()
   const { ctx } = createCtxStub()
   const { doc, appended } = createDocumentStub()
@@ -278,8 +398,12 @@ test('apply injects the panel stylesheet with the dsh-side-chat marker and sc- c
   const style = appended[0]
   assert.equal(style.tagName, 'style')
   assert.equal(style.dataset.dyn, 'dsh-side-chat')
-  assert.ok(style.textContent.includes('.sc-panel'))
-  assert.ok(style.textContent.includes('.sc-header'))
+  assert.ok(style.textContent.includes('.sc-root'))
+  assert.ok(style.textContent.includes('.sc-statusbar'))
+  assert.equal(style.textContent.includes('.sc-panel'), false, 'the floating panel root must be gone')
+  assert.equal(style.textContent.includes('position: fixed'), false, 'no floating positioning in the tab body')
+  assert.equal(style.textContent.includes('min(460px'), false, 'no floating width in the tab body')
+  assert.equal(style.textContent.includes('.sc-toggle'), false, 'the header toggle style must be gone')
   const classTokens = [...style.textContent.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((match) => match[1])
   assert.ok(classTokens.length > 10)
   for (const token of classTokens) {
@@ -335,6 +459,13 @@ test('foldEntries hides inherited history and the boundary message', () => {
   assert.deepEqual(nodes.map((node) => node.seq), [3, 4])
 })
 
+test('the boundary message is hidden even when it sits exactly at the snapshot floor', () => {
+  const { exports } = loadBundle()
+  const entries = [boundaryEntry(3), userEntry(4, 'real question'), boundaryEntry(5)]
+  const nodes = exports.foldEntries(entries, 3)
+  assert.deepEqual(nodes.map((node) => node.text), ['real question'])
+})
+
 test('foldEntries renders assistant blocks and attaches tool results by callId', () => {
   const { exports } = loadBundle()
   const entries = [
@@ -384,7 +515,7 @@ test('foldEntries tolerates empty and malformed input', () => {
   assert.deepEqual(exports.foldEntries([null, 7, {}, { type: 'user/message' }], 0), [])
 })
 
-test('runtime sends through /side-chat/api/ and removes the optimistic row on echo', async () => {
+test('runtime sends through /side-chat/api/, pulls on demand and removes the optimistic row on echo', async () => {
   const echoed = userEntry(3, 'hello side chat')
   const fetchStub = createFetchStub({
     create: { ok: true, sessionId: 'side-1', inheritedEventCount: 3 },
@@ -400,8 +531,8 @@ test('runtime sends through /side-chat/api/ and removes the optimistic row on ec
   })
   const { scheduler, runtime } = createRuntimeWith(fetchStub)
   runtime.open('main-1')
-  assert.equal(runtime.getActiveMainId(), 'main-1')
   assert.equal(runtime.getState('main-1').sessionId, null)
+  runtime.setVisible('main-1', true)
 
   await runtime.send('main-1', 'hello side chat')
   assert.deepEqual(fetchStub.calls.map((call) => call.url), [
@@ -417,7 +548,7 @@ test('runtime sends through /side-chat/api/ and removes the optimistic row on ec
   assert.equal(afterSend.inheritedEventCount, 3)
   assert.equal(afterSend.pending.length, 1)
   assert.equal(afterSend.draft, '')
-  assert.ok(scheduler.pending() >= 1, 'polling must be scheduled after creation')
+  assert.ok(scheduler.pending() >= 1, 'polling must be scheduled for a visible tab')
 
   await runtime.pollOnce('main-1')
   const afterPoll = runtime.getState('main-1')
@@ -433,18 +564,90 @@ test('runtime sends through /side-chat/api/ and removes the optimistic row on ec
   await runtime.close('main-1')
   assert.equal(fetchStub.calls.at(-1).url, `${API_PREFIX}close`)
   assert.equal(fetchStub.calls.at(-1).body.sessionId, 'side-1')
-  assert.equal(runtime.getActiveMainId(), null)
   assert.equal(runtime.getState('main-1'), null)
-  assert.equal(scheduler.pending(), 0, 'closing the panel must clear the poll timer')
+  assert.equal(scheduler.pending(), 0, 'closing the tab must clear the poll timer')
 })
 
-test('closing a panel before the first message never calls the host close route', async () => {
+test('tab visibility pauses polling and keeps the fromSeq cursor for the resume', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 3 },
+    prompt: { ok: true },
+    snapshot: (body) => ({
+      ok: true,
+      inheritedEventCount: 3,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: body.fromSeq <= 3 ? [userEntry(3, 'hello')] : []
+    })
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hello')
+  assert.equal(scheduler.pending(), 1, 'the visible tab schedules the next poll')
+
+  runtime.setVisible('main-1', false)
+  assert.equal(scheduler.pending(), 0, 'a hidden tab clears the poll timer')
+  const callsWhileHidden = fetchStub.calls.length
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.calls.length, callsWhileHidden, 'a hidden tab must not fetch')
+
+  runtime.setVisible('main-1', true)
+  assert.equal(scheduler.pending(), 1, 'becoming visible resumes polling')
+  scheduler.runAll()
+  await flush()
+  const snapshotCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`)
+  assert.equal(snapshotCalls.length, 1)
+  assert.equal(snapshotCalls[0].body.fromSeq, 3, 'the resume continues from the saved cursor')
+
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+  assert.equal(scheduler.pending(), 0)
+})
+
+test('a repeated message text does not retire a new optimistic row early', async () => {
+  const available = [userEntry(3, 'hello')]
+  const fetched = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: (body) => ({
+      ok: true,
+      inheritedEventCount: 0,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: available.filter((entry) => entry.seq >= (body.fromSeq ?? 0))
+    })
+  })
+  const { runtime } = createRuntimeWith(fetched)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hello')
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').pending.length, 0)
+
+  await runtime.send('main-1', 'hello')
+  assert.equal(runtime.getState('main-1').pending.length, 1)
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').pending.length, 1, 'the old echo must not retire the new row')
+
+  available.push(userEntry(4, 'hello'))
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').pending.length, 0)
+  assert.equal(runtime.getState('main-1').nodes.filter((node) => node.kind === 'user').length, 2)
+  await runtime.close('main-1')
+})
+
+test('closing a tab before the first message never calls the host close route', async () => {
   const fetchStub = createFetchStub({})
   const { runtime } = createRuntimeWith(fetchStub)
   runtime.open('main-1')
+  runtime.setVisible('main-1', true)
   await runtime.close('main-1')
   assert.equal(fetchStub.calls.length, 0)
-  assert.equal(runtime.getActiveMainId(), null)
+  assert.equal(runtime.getState('main-1'), null)
 })
 
 test('create failure surfaces an error row and restores the draft', async () => {
@@ -453,6 +656,7 @@ test('create failure surfaces an error row and restores the draft', async () => 
   })
   const { runtime } = createRuntimeWith(fetchStub)
   runtime.open('main-1')
+  runtime.setVisible('main-1', true)
   await runtime.send('main-1', 'hello')
   const state = runtime.getState('main-1')
   assert.equal(state.sessionId, null)
@@ -469,6 +673,7 @@ test('prompt failure keeps the session and reports the error instead of dropping
   })
   const { runtime } = createRuntimeWith(fetched)
   runtime.open('main-1')
+  runtime.setVisible('main-1', true)
   await runtime.send('main-1', 'hello')
   const state = runtime.getState('main-1')
   assert.equal(state.sessionId, 'side-1')
@@ -485,6 +690,7 @@ test('a not-found snapshot stops polling and shows the polling error', async () 
   })
   const { runtime, scheduler } = createRuntimeWith(fetched)
   runtime.open('main-1')
+  runtime.setVisible('main-1', true)
   await runtime.send('main-1', 'hello')
   assert.ok(scheduler.pending() >= 1)
   await runtime.pollOnce('main-1')
@@ -501,26 +707,13 @@ test('draft and stop controls route through the runtime', async () => {
   })
   const { runtime } = createRuntimeWith(fetched)
   runtime.open('main-1')
+  runtime.setVisible('main-1', true)
   runtime.setDraft('main-1', 'typed draft')
   assert.equal(runtime.getState('main-1').draft, 'typed draft')
   await runtime.send('main-1')
   assert.equal(fetched.calls[1].body.text, 'typed draft')
   await runtime.cancel('main-1')
   assert.equal(fetched.calls.at(-1).url, `${API_PREFIX}cancel`)
-})
-
-test('bundle also materializes when the primitives seed module is present', () => {
-  const { exports } = loadBundle({ primitives: true })
-  const { ctx } = createCtxStub()
-  const { doc } = createDocumentStub()
-  const previous = globalThis.document
-  globalThis.document = doc
-  try {
-    exports.apply(ctx)
-  } finally {
-    globalThis.document = previous
-  }
-  assert.equal(typeof exports.foldEntries, 'function')
 })
 
 test('fallback markdown covers code fences, headings, lists, tables and inline marks', () => {
@@ -555,41 +748,16 @@ test('fallback markdown covers code fences, headings, lists, tables and inline m
   assert.ok(flat.includes('sc-md-a'))
 })
 
-test('the boundary message is hidden even when it sits exactly at the snapshot floor', () => {
-  const { exports } = loadBundle()
-  const entries = [boundaryEntry(3), userEntry(4, 'real question'), boundaryEntry(5)]
-  const nodes = exports.foldEntries(entries, 3)
-  assert.deepEqual(nodes.map((node) => node.text), ['real question'])
-})
-
-test('a repeated message text does not retire a new optimistic row early', async () => {
-  const available = [userEntry(3, 'hello')]
-  const fetched = createFetchStub({
-    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
-    prompt: { ok: true },
-    snapshot: (body) => ({
-      ok: true,
-      inheritedEventCount: 0,
-      running: false,
-      status: 'idle',
-      lastError: null,
-      entries: available.filter((entry) => entry.seq >= (body.fromSeq ?? 0))
-    })
-  })
-  const { runtime } = createRuntimeWith(fetched)
-  runtime.open('main-1')
-  await runtime.send('main-1', 'hello')
-  await runtime.pollOnce('main-1')
-  assert.equal(runtime.getState('main-1').pending.length, 0)
-
-  await runtime.send('main-1', 'hello')
-  assert.equal(runtime.getState('main-1').pending.length, 1)
-  await runtime.pollOnce('main-1')
-  assert.equal(runtime.getState('main-1').pending.length, 1, 'the old echo must not retire the new row')
-
-  available.push(userEntry(4, 'hello'))
-  await runtime.pollOnce('main-1')
-  assert.equal(runtime.getState('main-1').pending.length, 0)
-  assert.equal(runtime.getState('main-1').nodes.filter((node) => node.kind === 'user').length, 2)
-  await runtime.close('main-1')
+test('bundle also materializes when the primitives seed module is present', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const { ctx } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const previous = globalThis.document
+  globalThis.document = doc
+  try {
+    exports.apply(ctx)
+  } finally {
+    globalThis.document = previous
+  }
+  assert.equal(typeof exports.foldEntries, 'function')
 })

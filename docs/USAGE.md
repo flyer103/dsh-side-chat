@@ -12,7 +12,7 @@ English | [中文](../README.zh.md)
 | item | value |
 |---|---|
 | DSH | tested on `0.2.1-rc.2`; the host half is a plain ESM Cordis plugin |
-| UI surface | Web GUI only (`dsh.client.platform: web`), including the Desktop app window |
+| UI surface | Web GUI only (`dsh.client.platform: web`), as a native tab in the right Sidebar; includes the Desktop app window |
 | Node.js | `>= 22` for the repository and its tests; the plugin has no runtime dependencies |
 | profile | a normal DSH profile such as `desktop` or `web` |
 | services | `webServer`, `agents`, `timer` are required; `sessionPersistence` is used when present |
@@ -97,19 +97,22 @@ You should see the inserted row:
 ```
 
 Restart DSH (quit and reopen the Desktop app, or restart the `dsh web` process). The
-button appears in the next session you open.
+「侧边会话」 card appears on the right Sidebar's guide page in the next session you open.
 
 ## First use
 
-1. Open any session. The session header shows a **「侧边会话」** button.
-2. Click it. The panel opens immediately at the right edge — no agent or fork work happens
-   yet.
+1. Open any session. In the session header, click **「Open sidebar」** (「打开侧边栏」) to
+   expand the right sidebar.
+2. The sidebar's guide page lists the **「侧边会话」** card. Click it; the side chat opens as
+   a native tab in that column. If the sidebar already shows other tabs, use the tab strip's
+   add control to open the guide page. No agent or fork work happens yet, and there is no
+   separate side-chat button and no floating overlay.
 3. Send the first message. That send creates the side session: it forks the parent's
    context, injects the boundary message, and starts the agent.
-4. Keep talking, stop a running turn, or close the panel. Closing destroys the side
-   session.
+4. Keep talking, stop a running turn, or close the tab. Collapsing the sidebar or switching
+   to another tab only pauses polling and keeps the session; closing the tab destroys it.
 
-A side chat is created lazily. Opening and closing the panel without sending a message
+A side chat is created lazily. Opening and closing the tab without sending a message
 produces no session, no model request, and no cost.
 
 ## Inheritance semantics
@@ -121,8 +124,8 @@ completed turn (`turn/end`). A turn still in flight is not part of the seed beca
 unclosed turn cannot be forked.
 
 The create response reports `inheritedEventCount`: the number of parent events copied into
-the seed. That number is also the panel's floor: the host never re-sends events below it,
-so the panel shows only the conversation that happens after the boundary. A parent with no
+the seed. That number is also the tab's floor: the host never re-sends events below it, so
+the tab shows only the conversation that happens after the boundary. A parent with no
 completed turn yet produces an unseeded side session (floor `0`).
 
 ### In-flight context snapshot
@@ -164,16 +167,17 @@ permission rows. It also inherits:
 - The side agent is created with `origin: 'subagent'`, which keeps it out of the session
   list. It deliberately has no `parentSession`, so it does not appear in the subagent
   catalog either.
-- One side session exists per parent session. Clicking the button again after closing
-  starts a new one; the old one cannot be reopened.
+- One side session exists per parent session and one tab per sidebar pane: the tab system
+  dedupes the page tab within its pane, and opening the guide card again focuses the
+  existing tab. Closing the tab ends the side session; it cannot be reopened.
 - The side session owns its own persisted log on disk. The main session's log is untouched.
-- Host handles live in memory. A page refresh or a GUI restart loses the panel binding even
+- Host handles live in memory. A page refresh or a GUI restart loses the tab state even
   though the process may still hold the agent; treat a refresh as the end of that side chat
   (see Known limitations).
-- The panel does not attach to the session through the generic client `sessions` service:
-  a parentless subagent-origin session is not addressable there. Its only message source is
+- The tab does not attach to the session through the generic client `sessions` service: a
+  parentless subagent-origin session is not addressable there. Its only message source is
   the host's read-only `/side-chat/api/snapshot` route, which answers for sessions this
-  plugin created and returns `not-found` for anything else — the panel cannot read other
+  plugin created and returns `not-found` for anything else — the tab cannot read other
   sessions.
 
 ## Mutation semantics — the point of this plugin
@@ -194,30 +198,38 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - Concurrency: a side chat and its parent can act at the same time, and there is no extra
   file lock between them. Avoid editing the same file from both at once.
 
-## Panel behavior
+## Sidebar tab behavior
 
-- Floating panel at the right edge, `min(460px, 46vw)` wide, above the main UI.
-- Header: status dot (idle/running), title and close button.
+- The side chat is a native tab type of the right sidebar (`kind: side-chat`): the tab chip
+  reads 「侧边会话」 and the tab body fills that column. There is no floating window, no
+  fixed width, no shadow or mask, and no page overlay.
+- The tab body has a status bar (status dot plus 尚未创建 / 运行中 / 发送中 / 空闲, and
+  「N 条待发送」 while messages queue), the message list, and the composer.
 - Messages: user bubbles with timestamps; assistant Markdown (reasoning folded, tool calls
-  folded with their results); running indicator; pending messages; error banner. Markdown
-  uses the shell's renderer when available and a built-in fallback otherwise.
+  folded with their results); running/thinking indicator; optimistic pending messages;
+  error banner. Markdown uses the shell's renderer when available and a built-in fallback
+  otherwise.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
-- Sent messages show optimistically until the committed transcript echoes them.
 - The message list follows the newest message while you stay at the bottom; scrolling up
   stops the auto-follow.
-- Panel state is per session: opening the side chat for another session replaces the visible
-  panel, and each session keeps its own transcript state until closed. The header button is
-  disabled while that session's panel is open — close it with the panel's × button.
+- One side-chat tab per parent session and sidebar pane; each session keeps its own tab
+  state. The tab type sets `keepMounted`, so switching tabs, switching sessions, collapsing
+  the column or changing dock mode preserves the transcript, scroll position and draft.
+- Collapsing the sidebar or switching to another tab makes the tab invisible: polling
+  pauses and the agent and transcript are kept. Closing the tab is the destructive action
+  (see lifecycle).
 
-### How messages reach the panel
+### How messages reach the tab
 
-The panel polls the host (`/side-chat/api/snapshot`) — roughly every 0.4 s while the side
-agent runs and every 1.5 s when idle — and renders **committed** session events. A reply
-appears when the assistant message commits, not token by token; the running indicator and
-the optimistic pending bubble cover the in-between state. Polling pauses while the browser
-tab is hidden and resumes when it becomes visible again.
+The tab polls the host (`/side-chat/api/snapshot`) — roughly every 0.4 s while the side
+agent runs and every 1.5 s when idle — but only while the tab is visible (its right sidebar
+is expanded, it is the active tab, and the browser tab is visible). It renders
+**committed** session events: a reply appears when the assistant message commits, not token
+by token, and the running indicator plus the optimistic pending bubble cover the in-between
+state. Hiding the tab, collapsing the column or hiding the browser tab pauses polling; it
+resumes later from the last seen sequence, so no history is lost.
 
 ## Token cost
 
@@ -231,26 +243,28 @@ turns in the main session after creation are not added to it. Treat the first me
 The side session inherits the parent's approval policy. With a `never` policy (for example
 the `danger-full-access` preset) tools run without prompts.
 
-With a policy that asks the human, the approval prompt is **not rendered inside the side
-panel**, and the side agent waits for an answer that the panel cannot give. Until approval
-surfacing ships (P1), use a profile/preset whose policy does not require interactive
-confirmation for side chats that need to write files or run commands.
+With a policy that asks the human, the approval prompt is **not rendered inside the
+side-chat tab**, and the side agent waits for an answer that the tab cannot give. Until
+approval surfacing ships (P1), use a profile/preset whose policy does not require
+interactive confirmation for side chats that need to write files or run commands.
 
 ## Lifecycle and destruction
 
 | action | effect |
 |---|---|
-| click 「侧边会话」 | client state only; the panel opens, no agent |
+| open the guide card | client tab state only; no agent |
 | first send | create: fork seed, snapshot, boundary message, agent |
-| close (×) | client clears state, then calls `close`; host removes the handle before disposing it |
+| collapse sidebar / switch tab | polling pauses; tab state, draft and the side session are kept |
+| close the tab | client clears the tab state, then calls `close` if a side session exists; host removes the handle before disposing it |
 | close during a running turn | dispose cancels the turn; the handle is gone |
-| close result | the agent is disposed; the host then deletes the side session's own persisted directory itself with `node:fs/promises.rm` (best effort, guarded to that directory) |
-| reopen | not possible; a new click starts a new side session |
+| close result | the agent is disposed; the host then deletes the side session's own persisted directory from the Host process with `node:fs/promises.rm` (best effort, guarded to that directory) |
+| reopen | the destroyed side session cannot be reopened; opening the guide card again starts a new tab, and its side session is created on the next message |
 
-Disposal always happens; artifact deletion is best effort. If the persistence service
-service is unavailable, or the sandbox refuses the delete, close still succeeds and only
-leaves the side session's own artifact on disk as an orphan — it is never shown in the GUI
-or the session list, and the main session and workspace are never affected. A racing
+Disposal happens whenever a side session existed; artifact deletion is best effort. If the
+persistence service cannot locate the artifact or the removal fails, close still succeeds
+and only leaves the side session's own artifact on disk as an orphan — it is never shown in
+the GUI or the session list, and the main session and workspace are never affected. Closing
+a tab that never sent a message only discards the empty client tab. A racing
 `close`/`prompt` returns `not-found` rather than double-freeing.
 
 ## Compatibility
@@ -258,8 +272,9 @@ or the session list, and the main session and workspace are never affected. A ra
 - Verified target: DSH `0.2.1-rc.2`, Desktop profile, Web GUI. Verified in an isolated copy of
   the desktop profile: the plugin launches, the seven host routes answer, and the client
   bundle is served.
-- Web platform only. There is no CLI/TUI UI for the panel; the host routes exist whenever
-  the profile loads the plugin.
+- Web platform only, and the entry point is the right sidebar's tab system
+  (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
+  routes exist whenever the profile loads the plugin.
 - `package.json` declares no `engines.dsh` and no DSH peer dependency, so DSH does not
   version-gate installation. That is not a compatibility promise: newer DSH versions are
   untested. `dsh.plugin.json` records the tested DSH version as metadata only; DSH does not
@@ -289,23 +304,25 @@ no history to migrate. If you installed into a throwaway profile, delete
 
 ## Troubleshooting
 
-**The session header has no 「侧边会话」 button.**
+**The right sidebar's guide page has no 「侧边会话」 card.**
 
 1. Confirm the bundle is composed: `dsh --profile <name> --dump-config | grep -A2 dsh-side-chat`.
    If nothing shows, the package is not in `dsh.profile.bundles`; re-run the install command
    for the profile you actually run (`desktop` for the Desktop app, `web` for a web process).
 2. Restart DSH. A change made while the profile was running is not guaranteed to load
    without a restart, and the `web` profile is startup-only.
-3. Check that the client half loaded: the Plugins page (or the plugin inventory) should
-   list the `dsh-side-chat` row as active; browser devtools show a client import error if it
-   did not.
+3. Expand the current session's right sidebar with 「Open sidebar」. If the sidebar already
+   shows other tabs, use the tab strip's add control to open the guide page.
+4. Check that the client half loaded: the Plugins page (or the plugin inventory) should list
+   the `dsh-side-chat` row as active; browser devtools show a client import error if it did
+   not.
 
-**The panel opens but the first message fails.**
+**The tab opens but the first message fails.**
 
-The panel shows an error banner with the host's error code. `create-failed` means the fork
-or agent creation rejected — check the DSH log. `not-found` means the parent session is
-gone (closed, or the GUI reloaded): close the panel and start a new side chat.
-`unknown-source` means the session id the button used no longer exists.
+The tab shows an error banner with the host's error code. `create-failed` means the fork or
+agent creation rejected — check the DSH log. `not-found` means the parent session is gone
+(closed, or the GUI reloaded): close the tab and open a new side chat. `unknown-source` means
+the session the tab was opened for no longer exists.
 
 To check the host half directly, call a route with an empty body; a live plugin answers
 `{"ok":true,...}`:
@@ -318,18 +335,19 @@ curl -s -X POST "<dsh-web-base-url>/side-chat/api/list" \
 **The side chat seems stuck.**
 
 It may be waiting for an approval its policy requires the human to answer (see the
-approval section), or a tool is still running. Press Stop to cancel the turn.
+approval section), or a tool is still running. Press Stop to cancel the turn. Check that the
+tab is the active tab in an expanded right sidebar; a hidden tab deliberately stops polling.
 
 **A refresh lost the side chat.**
 
-Expected in this phase: host handles are in memory and the panel binding is not restored.
-Close the panel and open a new side chat.
+Expected in this phase: tab state and host handles are in memory and not restored across a
+reload. Reopen the guide card; a new side chat is created on the next message.
 
 **A reply appears all at once instead of streaming.**
 
-Expected: the panel renders committed session events from the snapshot route, so an
-assistant message shows up when the turn commits. The running indicator shows progress in
-the meantime.
+Expected: the tab renders committed session events from the snapshot route, so an assistant
+message shows up when the turn commits. The running indicator shows progress in the
+meantime.
 
 **`dsh plugin --profile desktop add ...` fails.**
 
@@ -346,30 +364,28 @@ is about a dependency, not this plugin.
 
 ## Known limitations
 
-- **Approval prompts are not surfaced in the panel.** See above.
-- **A side chat cannot be reopened.** Closing destroys it; a refresh or GUI restart loses
-  the panel binding.
+- **Approval prompts are not surfaced in the side-chat tab.** See above.
+- **A closed tab cannot be restored.** Closing destroys the side session; a refresh or GUI
+  restart also loses the tab state.
+- **One side-chat tab per parent session and sidebar pane.** Multiple side chats per parent
+  are P1. Reopening the guide card focuses the existing tab rather than adding a second one.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
-  own session log can be left on disk as an orphan when removal fails.
-  It is never listed in the GUI or session list.
-- **Replies are not token-streamed.** The panel polls committed events; an assistant reply
+  own session log can be left on disk as an orphan when removal fails. It is never listed in
+  the GUI or session list.
+- **Replies are not token-streamed.** The tab polls committed events; an assistant reply
   appears when its message commits, with a running indicator before that.
-- **One visible panel at a time.** Each session keeps its own side-chat state, but opening
-  the side chat for another session replaces the visible panel. The session-header button
-  is disabled while that session's panel is open.
 - **History is not refreshed.** The snapshot is taken once, at creation.
-- **P1 items are designed but not implemented:** model picker for the side session,
-  multiple concurrent side chats per parent, side-session history across a GUI restart,
-  approval rendering in the panel.
-- **One side session per parent session** in this phase.
-- The panel is Web-only, and the plugin is not a replacement for the native conversation UI.
+- **P1 items are designed but not implemented:** model picker for the side session, multiple
+  concurrent side chats per parent, side-session history across a GUI restart, approval
+  rendering in the tab.
+- The tab is Web-only, and the plugin is not a replacement for the native conversation UI.
 
 ## File map
 
 | file | role |
 |---|---|
 | `lib/index.js` | host half: `webServer` routes, fork seed + recent-context snapshot, boundary injection, per-source session registry, close/dispose |
-| `lib/client.js` | client half: session-header button, `shell.overlay` panel, snapshot rendering, composer, RPC calls |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the tab body (snapshot rendering, composer, RPC calls) and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |
@@ -380,5 +396,5 @@ is about a dependency, not this plugin.
 
 - [README](../README.md) — positioning, comparison, quick start.
 - [DESIGN.md](DESIGN.md) — scope, phases and adversarial notes.
-- [CONTRACT.md](CONTRACT.md) — routes, slots and rendering contract.
+- [CONTRACT.md](CONTRACT.md) — routes, Sidebar tab integration and rendering contract.
 - [API-NOTES.md](API-NOTES.md) — the DSH `0.2.1-rc.2` API findings behind the implementation.

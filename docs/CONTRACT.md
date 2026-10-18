@@ -46,12 +46,24 @@ removes the handle before disposing so a racing call gets `not-found`, never a d
 `POST <path>` with `Content-Type: application/json`, body `JSON.stringify(args)`. Non-2xx or
 `ok !== true` is an error. No auth headers: same-origin only.
 
-## Client slots
+## Client integration (right Sidebar tab, no standalone button)
 
-| slot | registration | component |
+The side chat is a native tab type of the right Sidebar, opened from that column's guide
+page — the same public path every shipped tab uses (`ctx.sidebarRightTabs.register` +
+`ctx.slots.register`). There is no session-header button and no floating overlay.
+
+| registration | value | purpose |
 |---|---|---|
-| `conversation.session.header.actions` | `{ id: 'side-chat.toggle', order: 200, label: '侧边会话' }` | header toggle button |
-| `shell.overlay` | `{ id: 'side-chat.panel', order: 200, label: '侧边会话面板' }` | floating panel |
+| `ctx.sidebarRightTabs.register` | `{ id: pkg, kind: 'side-chat', priority: 'extension', title, guide: [{ id: 'side-chat', order: 10, title, description }], keepMounted: true }` | tab type + guide entry |
+| `ctx.slots.register` | `{ name: 'sidebar.right.pane.tab', key: pkg }` | tab body (message flow + composer) |
+| `ctx.slots.register` | `{ name: 'sidebar.right.pane.tab.title', key: pkg }` | tab chip title (optional) |
+| `ctx.sidebarRight.registerCloseHandler` | `('side-chat', (sessionId) => close)` | closing the tab destroys the side session |
+
+- One tab per parent session and pane (page-tab dedupe, no `multiple`); `keepMounted` keeps
+  scroll position and draft across tab switches.
+- Polling is gated by the tab's `visible` flag from `useTabInfo()`: collapsing the column or
+  switching tabs pauses polling and keeps the side session; closing the tab destroys it.
+- Body props: `sessionId` (parent session) plus the framework-injected `useTabInfo()`.
 
 ## Rendering contract (client)
 

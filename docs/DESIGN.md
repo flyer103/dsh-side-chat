@@ -18,8 +18,9 @@ Delta against the existing community plugins:
 
 ## P0 (this phase)
 
-1. **Entry**: a `侧边会话` button in `conversation.session.header.actions`; clicking opens the
-   panel instantly (no agent/fork work).
+1. **Entry**: the plugin registers a native tab type of the right Sidebar (`kind: side-chat`)
+   plus a guide entry, so it is reached through the session header's "Open sidebar" control
+   rather than a standalone button. Opening the tab performs no agent/fork work.
 2. **Lazy creation**: the side session is created on the first submitted message.
 3. **Context inheritance**: seed = the parent's event prefix through its last completed
    turn (`turn/end`); plus a live-log snapshot of everything committed after that boundary
@@ -35,9 +36,11 @@ Delta against the existing community plugins:
 7. **Lifecycle**: closing the panel disposes the agent and then best-effort deletes its
    persisted artifact (a failed removal is logged; the close still succeeds and the orphan
    never appears in any list). A side chat cannot be reopened.
-8. **UI**: own floating panel (right edge, 460px / 46vw), user bubbles + assistant markdown,
-   reasoning fold, tool chips with results, running/thinking state, optimistic pending
-   messages, Stop, auto-follow scrolling, `Enter` send / `Shift+Enter` newline.
+8. **UI**: the side chat lives in a right-Sidebar tab (body fills the column): user bubbles +
+   assistant markdown, reasoning fold, tool chips with results, running/thinking state,
+   optimistic pending messages, Stop, auto-follow scrolling, `Enter` send / `Shift+Enter`
+   newline. Collapsing the column or switching tabs pauses polling and keeps the session;
+   closing the tab destroys it.
 
 ## P1 (designed, not implemented)
 

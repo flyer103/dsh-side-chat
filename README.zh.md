@@ -1,6 +1,6 @@
 # dsh-side-chat
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI 用的**侧边会话**：点会话头部按钮，右侧浮出面板，聊完关掉，主会话完全不受影响——但侧边会话用的是**同一个 agent、同一套工具，并且会真实修改同一工作区的文件**。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web GUI 用的**侧边会话**：从会话头部展开右侧边栏，添加 **「侧边会话」** tab，聊完关掉，主会话完全不受影响——但侧边会话用的是**同一个 agent、同一套工具，并且会真实修改同一工作区的文件**。
 
 [English](README.md) | 中文
 
@@ -36,15 +36,16 @@ node scripts/install.mjs --profile desktop            # 幂等；不会重启 DS
 node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 ```
 
-然后**重启 DSH**，打开任意会话，点会话头部的 **「侧边会话」**，发送第一条消息。侧边会话在首条消息发送时才创建，关闭面板即销毁；只打开不发送不产生任何会话或开销。
+然后**重启 DSH**，打开任意会话，从会话头部展开右侧边栏（**「打开侧边栏」/「Open sidebar」**），在边栏的引导页里点 **「侧边会话」** 卡片，侧边会话会作为该栏的一个原生 tab 打开。**没有独立的侧边会话按钮，也没有浮层**：入口就在右侧边栏的引导页（已开其它 tab 时，可用 tab 条上的「+」控件打开引导页）。发送第一条消息——侧边会话在首条消息发送时才创建，关闭 tab 即销毁；收起侧边栏或切到别的 tab 只是暂停，不销毁；只打开 tab 不发送不产生任何会话或开销。
 
 ## 它做什么
 
+- **右侧边栏原生 tab**：作为右侧边栏里的一个 tab 存在，没有独立按钮、没有浮层。
 - **继承上下文**：父会话已完成的轮次，加上主会话此刻正在做什么的实时快照。
 - **继承 agent**：相同工作目录、preset 组合、工具、技能、模型路由、sandbox 模式与审批策略。
 - **真实改文件**：write / edit / bash 的改动落在同一工作区，主会话能看到。
 - **隔离 transcript**：侧边会话的对话不写主会话、不进会话列表、不进 subagent 目录。
-- **关闭即销毁**：agent 被 dispose，host 会尝试删除它的落盘产物；侧边会话无法再次打开。
+- **关闭即销毁**：关闭 tab 时 agent 被 dispose，host 会尝试删除它的落盘产物；侧边会话无法再次打开。收起侧边栏或切换 tab 只是暂停。
 
 ## 兼容性
 
@@ -55,8 +56,10 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 
 ## 已知限制
 
-- **面板内不呈现审批提示**：侧边会话继承父会话的审批策略；父策略需要人工确认时，侧边会话会等待。要真实改文件，建议用 `danger-full-access` 这类不需要交互确认的策略。
-- P1 已设计未实现：模型选择器、单会话多个侧边会话、GUI 重启后恢复侧边会话、面板内审批呈现。
+- **侧边会话 tab 内不呈现审批提示**：侧边会话继承父会话的审批策略；父策略需要人工确认时，侧边会话会等待。要真实改文件，建议用 `danger-full-access` 这类不需要交互确认的策略。
+- 每个父会话在每个侧边栏分栏（pane）里只有一个侧边会话 tab；再次点引导页卡片会聚焦已有 tab。
+- tab 关闭后无法恢复：重新打开引导页卡片会开始一个新的侧边会话，agent 在下次发消息时才创建。
+- P1 已设计未实现：模型选择器、单会话多个侧边会话、GUI 重启后恢复侧边会话、tab 内审批呈现。
 - 继承的上下文是创建时的快照，之后主会话的新消息不会推给已存在的侧边会话。
 - 回复不是逐 token 流式渲染：assistant 消息在提交后才出现，期间显示运行中指示。
 - 首条消息的请求大小约等于主会话的下一次请求（因为它带着继承历史）。
@@ -65,7 +68,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 
 - [docs/USAGE.md](docs/USAGE.md) — 完整语义（继承/隔离/修改/生命周期/安装/回滚/排障，英文）。
 - [docs/DESIGN.md](docs/DESIGN.md) — 范围、阶段与对抗性推演。
-- [docs/CONTRACT.md](docs/CONTRACT.md) — host 路由、client slot 与渲染契约。
+- [docs/CONTRACT.md](docs/CONTRACT.md) — host 路由、右侧边栏 tab 集成与渲染契约。
 - [docs/API-NOTES.md](docs/API-NOTES.md) — 实现所依据的 DSH `0.2.1-rc.2` API 结论。
 
 ## 仓库结构
@@ -73,7 +76,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 | 路径 | 作用 |
 |---|---|
 | `lib/index.js` | host 半部：路由、fork seed、boundary 注入、close/dispose |
-| `lib/client.js` | client 半部：会话头部按钮 + 浮动 overlay 面板 |
+| `lib/client.js` | client 半部：右侧边栏 tab 类型 + 引导页入口，以及 tab 正文（消息区 + composer） |
 | `cordis.patch.yml` | bundle patch：插入 `dsh-side-chat` 行 |
 | `scripts/install.mjs` | 本地仓库的幂等安装/卸载脚本 |
 | `dsh.plugin.json` | 社区约定的清单元数据；DSH 不读取（官方展示元数据来自 `package.json` 与可选 `locale/*.json`） |
