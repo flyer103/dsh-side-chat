@@ -4,6 +4,10 @@ A **side chat** for the [DeepSeek Harness](https://github.com/deepseek-ai/deepse
 
 English | [中文](README.zh.md)
 
+[![CI](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml/badge.svg)](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/flyer103/dsh-side-chat)](https://github.com/flyer103/dsh-side-chat/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 ## Why this plugin
 
 Forking a conversation is easy. Letting the fork *do work* is the part most side-chat plugins avoid. This one inherits the parent's preset and permissions and explicitly allows real mutations, so it is useful for "quickly change this file", "try that fix", or "look into the log" bursts without derailing the main session.

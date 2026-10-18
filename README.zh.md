@@ -4,6 +4,10 @@
 
 [English](README.md) | 中文
 
+[![CI](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml/badge.svg)](https://github.com/flyer103/dsh-side-chat/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/flyer103/dsh-side-chat)](https://github.com/flyer103/dsh-side-chat/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 ## 为什么需要它
 
 「fork 一段上下文」不难，「让 fork 真正干活」才是多数侧边会话插件回避的部分。本插件继承父会话的 preset 与权限，并明确允许真实修改文件：临时改个文件、试一个修法、翻一下日志，都能在侧边完成，不用打断主会话。
