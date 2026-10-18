@@ -417,4 +417,3 @@ is about a dependency, not this plugin.
 - [README](../README.md) — positioning, comparison, quick start.
 - [DESIGN.md](DESIGN.md) — scope, phases and adversarial notes.
 - [CONTRACT.md](CONTRACT.md) — routes, Sidebar tab integration and rendering contract.
-- [API-NOTES.md](API-NOTES.md) — the DSH `0.2.1-rc.2` API findings behind the implementation.

@@ -70,7 +70,6 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - [docs/USAGE.md](docs/USAGE.md) — full semantics: inheritance, isolation, mutation, lifecycle, installation, rollback, troubleshooting.
 - [docs/DESIGN.md](docs/DESIGN.md) — scope, phases and adversarial notes.
 - [docs/CONTRACT.md](docs/CONTRACT.md) — host routes, Sidebar tab integration and rendering contract.
-- [docs/API-NOTES.md](docs/API-NOTES.md) — the DSH `0.2.1-rc.2` API findings behind the implementation.
 
 ## Repository layout
 

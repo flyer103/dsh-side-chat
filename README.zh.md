@@ -70,7 +70,6 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - [docs/USAGE.md](docs/USAGE.md) — 完整语义（继承/隔离/修改/生命周期/安装/回滚/排障，英文）。
 - [docs/DESIGN.md](docs/DESIGN.md) — 范围、阶段与对抗性推演。
 - [docs/CONTRACT.md](docs/CONTRACT.md) — host 路由、右侧边栏 tab 集成与渲染契约。
-- [docs/API-NOTES.md](docs/API-NOTES.md) — 实现所依据的 DSH `0.2.1-rc.2` API 结论。
 
 ## 仓库结构
 
