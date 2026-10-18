@@ -9,17 +9,6 @@ English | [中文](README.zh.md)
 [![npm](https://img.shields.io/npm/v/@flyer103/dsh-side-chat)](https://www.npmjs.com/package/@flyer103/dsh-side-chat)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Why this plugin
-
-Forking a conversation is easy. Letting the fork *do work* is the part most side-chat plugins avoid. This one inherits the parent's preset and permissions and explicitly allows real mutations, so it is useful for "quickly change this file", "try that fix", or "look into the log" bursts without derailing the main session.
-
-| Plugin | Can edit files | Inherits in-flight context | Ephemeral |
-|---|---|---|---|
-| `Lukknow0/dsh-side-chat` | no — read-only Q&A | yes | yes |
-| `Diluka/dsh-side-session` | no — prompt forbids mutations | yes (live-log snapshot) | yes |
-| `Yur0918/dsh-sidepanel` | no — read-only persona side chat | fork only | no — replays after refresh |
-| **`flyer103/dsh-side-chat`** | **yes — full tool chain in the same workspace** | **yes** | **yes** |
-
 ## Quick start
 
 ```bash

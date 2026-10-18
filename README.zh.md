@@ -9,17 +9,6 @@
 [![npm](https://img.shields.io/npm/v/@flyer103/dsh-side-chat)](https://www.npmjs.com/package/@flyer103/dsh-side-chat)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 为什么需要它
-
-「fork 一段上下文」不难，「让 fork 真正干活」才是多数侧边会话插件回避的部分。本插件继承父会话的 preset 与权限，并明确允许真实修改文件：临时改个文件、试一个修法、翻一下日志，都能在侧边完成，不用打断主会话。
-
-| 插件 | 能真实改文件 | 继承进行中上下文 | 临时、不留痕 |
-|---|---|---|---|
-| `Lukknow0/dsh-side-chat` | 否——只读问答 | 是 | 是 |
-| `Diluka/dsh-side-session` | 否——提示词禁止修改 | 是（实时日志快照） | 是 |
-| `Yur0918/dsh-sidepanel` | 否——只读人格侧聊 | 仅 fork | 否——刷新后仍可回放 |
-| **`flyer103/dsh-side-chat`** | **能——同一工作区的完整工具链** | **是** | **是** |
-
 ## 快速开始
 
 ```bash
