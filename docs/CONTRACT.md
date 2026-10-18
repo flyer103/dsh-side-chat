@@ -1,4 +1,4 @@
-# Contract — dsh-side-chat (v0.1.0)
+# Contract — dsh-side-chat (v0.3.2)
 
 Two halves, one JSON RPC surface. The host half is a plain ESM Cordis plugin; the client
 half is a browser ModuleLoader bundle. They never share imports — only these routes.

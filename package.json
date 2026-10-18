@@ -1,6 +1,6 @@
 {
   "name": "@flyer103/dsh-side-chat",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DSH side chat: fork the current session into an ephemeral side conversation that can really edit files, without polluting the main transcript.",
   "type": "module",
   "main": "lib/index.js",

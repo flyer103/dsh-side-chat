@@ -2,7 +2,7 @@
 
 This is the semantic reference for `@flyer103/dsh-side-chat`: what a side chat inherits,
 what it isolates, what it may change, and what closing it destroys. It describes the
-shipped `0.1.0` on DSH `0.2.1-rc.2`; see [DESIGN.md](DESIGN.md) for rationale and
+shipped `0.3.2` on DSH `0.2.1-rc.2`; see [DESIGN.md](DESIGN.md) for rationale and
 [CONTRACT.md](CONTRACT.md) for the host/client wire contract.
 
 English | [中文](../README.zh.md)
@@ -59,8 +59,8 @@ is needed. Use a pinned commit when you need reproducibility:
 
 ```bash
 cd /path/to/dsh-side-chat
-npm pack                       # writes flyer103-dsh-side-chat-0.1.0.tgz
-dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.1.0.tgz"
+npm pack                       # writes flyer103-dsh-side-chat-0.3.2.tgz
+dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.3.2.tgz"
 ```
 
 An `https:` tarball URL is accepted the same way.
