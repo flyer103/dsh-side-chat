@@ -266,8 +266,8 @@ function createFetchStub(responses) {
   return { fetchImpl, calls }
 }
 
-function createRuntimeWith(fetchStub) {
-  const { exports } = loadBundle()
+function createRuntimeWith(fetchStub, options = {}) {
+  const { exports } = loadBundle({ primitives: options.primitives === true })
   const scheduler = createSchedulerStub()
   const runtime = exports.createRuntime({
     fetch: fetchStub.fetchImpl,
@@ -275,9 +275,177 @@ function createRuntimeWith(fetchStub) {
     clearTimeout: scheduler.clearTimeout,
     document: null,
     pollRunningMs: 5,
-    pollIdleMs: 5
+    pollIdleMs: 5,
+    ...(options.config === undefined ? {} : options.config)
   })
   return { exports, scheduler, runtime }
+}
+
+/** A pushable stream body: tests decide when (and whether) the next SSE chunk exists. */
+function createChunkQueue() {
+  const encoder = new TextEncoder()
+  const queue = []
+  const waiters = []
+  let closed = false
+  function settleWaiters(result) {
+    const pending = waiters.splice(0)
+    for (const resolve of pending) resolve(result)
+  }
+  const reader = {
+    read() {
+      if (queue.length > 0) return Promise.resolve({ done: false, value: queue.shift() })
+      if (closed === true) return Promise.resolve({ done: true, value: undefined })
+      return new Promise((resolve) => {
+        waiters.push(resolve)
+      })
+    },
+    cancel() {
+      closed = true
+      settleWaiters({ done: true, value: undefined })
+      return Promise.resolve()
+    }
+  }
+  return {
+    reader,
+    push(text) {
+      if (closed === true) return
+      const value = encoder.encode(text)
+      const waiter = waiters.shift()
+      if (waiter !== undefined) waiter({ done: false, value })
+      else queue.push(value)
+    },
+    close() {
+      if (closed === true) return
+      closed = true
+      settleWaiters({ done: true, value: undefined })
+    },
+    isClosed() {
+      return closed
+    }
+  }
+}
+
+function sseFrame(event, data) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+}
+
+/**
+ * Fetch stub that can answer /events with a controlled SSE stream (`stream`), a JSON
+ * document without a body (`json`), a body that only contains JSON (`json-body`), or a
+ * body whose reads never resolve (`hanging`).
+ */
+function createStreamingFetchStub(options = {}) {
+  const calls = []
+  const streams = []
+  const handlers = options.handlers === undefined ? {} : options.handlers
+  const eventsMode = options.eventsMode === undefined ? 'stream' : options.eventsMode
+  function payloadOf(name, body) {
+    const handler = handlers[name]
+    if (typeof handler === 'function') return handler(body)
+    if (handler === undefined) return { ok: true }
+    return handler
+  }
+  const fetchImpl = async (url, init) => {
+    const name = url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url
+    const body = init === undefined || init.body === undefined ? {} : JSON.parse(init.body)
+    calls.push({ url, body, method: init === undefined ? undefined : init.method, init })
+    if (name !== 'events') {
+      return { ok: true, status: 200, json: async () => payloadOf(name, body) }
+    }
+    if (eventsMode === 'json' || eventsMode === 'json-body') {
+      const payload = payloadOf('events', body)
+      if (eventsMode === 'json') return { ok: true, status: 200, json: async () => payload }
+      const queue = createChunkQueue()
+      queue.push(JSON.stringify(payload))
+      queue.close()
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json; charset=utf-8' },
+        body: { getReader: () => queue.reader }
+      }
+    }
+    if (eventsMode === 'hanging') {
+      const readers = []
+      const reader = {
+        read() {
+          return new Promise((resolve) => {
+            readers.push(resolve)
+          })
+        },
+        cancel() {
+          const pending = readers.splice(0)
+          for (const resolve of pending) resolve({ done: true, value: undefined })
+          return Promise.resolve()
+        }
+      }
+      streams.push({ init, queue: null, response: null })
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream; charset=utf-8' },
+        body: { getReader: () => reader }
+      }
+    }
+    const queue = createChunkQueue()
+    const response = {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'text/event-stream; charset=utf-8' },
+      body: { getReader: () => queue.reader }
+    }
+    streams.push({ init, queue, response })
+    return response
+  }
+  return { fetchImpl, calls, streams }
+}
+
+/** Live + committed messages used by the streaming tests. */
+function streamingHandlers(extra = {}) {
+  return {
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: {
+      ok: true,
+      inheritedEventCount: 0,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: [],
+      live: null
+    },
+    ...extra
+  }
+}
+
+/** Open the panel on a visible tab, send one message, then run the scheduled connection. */
+async function openConnectedStream(fetchStub, options = {}) {
+  const created = createRuntimeWith(fetchStub, options)
+  created.runtime.open('main-1')
+  created.runtime.setVisible('main-1', true)
+  await created.runtime.send('main-1', 'hello side chat')
+  created.scheduler.runAll()
+  await flush()
+  return created
+}
+
+function collectElements(tree, visit) {
+  if (tree === null || tree === undefined) return
+  if (Array.isArray(tree)) {
+    for (const item of tree) collectElements(item, visit)
+    return
+  }
+  if (typeof tree !== 'object') return
+  visit(tree)
+  collectElements(tree.children, visit)
+}
+
+function findElement(tree, predicate) {
+  let found
+  collectElements(tree, (element) => {
+    if (found === undefined && predicate(element)) found = element
+  })
+  return found
 }
 
 function flush() {
@@ -968,4 +1136,529 @@ test('bundle also materializes when the primitives seed module is present', () =
   assert.equal(typeof exports.foldEntries, 'function')
   const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
   assert.equal(body.options.locale, NS)
+})
+
+test('a live SSE stream renders the assistant attempt and reconciles with the committed settlement', async () => {
+  const fetchStub = createStreamingFetchStub({
+    handlers: streamingHandlers({
+      snapshot: {
+        ok: true,
+        inheritedEventCount: 3,
+        running: false,
+        status: 'idle',
+        lastError: null,
+        entries: [],
+        live: null
+      }
+    })
+  })
+  const { exports, scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hello side chat')
+  scheduler.runAll()
+  await flush()
+
+  assert.equal(fetchStub.streams.length, 1, 'the visible panel opens exactly one stream')
+  assert.equal(fetchStub.streams[0].init.method, 'POST')
+  const eventsCall = fetchStub.calls.find((call) => call.url === `${API_PREFIX}events`)
+  assert.deepEqual(eventsCall.body, { sessionId: 'side-1', fromSeq: 0 })
+  assert.equal(runtime.getState('main-1').streaming, true)
+  assert.equal(runtime.getState('main-1').streamMode, 'unknown', 'the mode is decided by hello')
+
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 3,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [userEntry(3, 'hello side chat')],
+    truncated: false,
+    live: {
+      revision: 1,
+      activeAttempt: { attemptId: 'attempt-1', turn: 1, step: 1, nextIndex: 1, blocks: [{ kind: 'text', text: 'Hel' }] }
+    }
+  }))
+  await flush()
+  let state = runtime.getState('main-1')
+  assert.equal(state.streamMode, 'stream')
+  assert.equal(state.inheritedEventCount, 3)
+  assert.equal(state.nextSeq, 4)
+  assert.equal(state.running, true)
+  assert.equal(state.status, 'running')
+  assert.equal(state.lastError, null)
+  assert.equal(state.pollError, null)
+  assert.deepEqual(state.nodes.map((node) => node.kind), ['user'])
+  assert.equal(state.nodes[0].text, 'hello side chat')
+  assert.equal(exports.liveAttemptOf(state), state.live.activeAttempt)
+  assert.deepEqual(exports.liveBlocksOf(state), [{ kind: 'text', text: 'Hel' }])
+
+  fetchStub.streams[0].queue.push(sseFrame('live', {
+    live: {
+      revision: 2,
+      activeAttempt: {
+        attemptId: 'attempt-1',
+        turn: 1,
+        step: 1,
+        nextIndex: 3,
+        blocks: [
+          { kind: 'reasoning', text: 'thinking about it' },
+          { kind: 'text', text: 'Hello world' },
+          { kind: 'tool-call', callId: 'call-1', name: 'bash', argsRaw: '{"command":"ls"}' }
+        ]
+      }
+    }
+  }))
+  await flush()
+  state = runtime.getState('main-1')
+  const blocks = exports.liveBlocksOf(state)
+  assert.deepEqual(blocks.map((block) => block.kind), ['reasoning', 'text', 'tool-call'])
+  assert.equal(blocks[1].text, 'Hello world')
+  assert.equal(blocks[2].callId, 'call-1')
+  assert.equal(blocks[2].name, 'bash')
+  assert.equal(blocks[2].result, null)
+
+  fetchStub.streams[0].queue.push(sseFrame('live', { live: null }))
+  await flush()
+  state = runtime.getState('main-1')
+  assert.equal(state.live, null, 'an authoritative live frame clears the attempt')
+  assert.equal(
+    fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length,
+    1,
+    'clearing an active live attempt triggers one catch-up snapshot'
+  )
+
+  fetchStub.streams[0].queue.push(sseFrame('live', {
+    live: {
+      revision: 3,
+      activeAttempt: {
+        attemptId: 'attempt-1',
+        turn: 1,
+        step: 1,
+        nextIndex: 3,
+        blocks: [{ kind: 'text', text: 'Hello world' }]
+      }
+    }
+  }))
+  await flush()
+
+  fetchStub.streams[0].queue.push(sseFrame('event', {
+    entry: assistantEntry(4, [{ type: 'text', text: 'Hello world' }])
+  }))
+  await flush()
+  state = runtime.getState('main-1')
+  assert.equal(state.live, null, 'the committed settlement clears the live attempt')
+  assert.equal(state.nextSeq, 5)
+  assert.deepEqual(state.nodes.map((node) => node.kind), ['user', 'assistant'])
+  assert.equal(state.nodes[1].blocks[0].text, 'Hello world')
+  assert.equal(exports.liveAttemptOf(state), null)
+  assert.deepEqual(exports.liveBlocksOf(state), [])
+  assert.equal(state.streaming, true, 'the stream stays open after the settlement')
+
+  runtime.setVisible('main-1', false)
+  assert.equal(fetchStub.streams[0].init.signal.aborted, true)
+  await runtime.close('main-1')
+  assert.equal(scheduler.pending(), 0)
+})
+
+test('the SSE parser handles split frames, multiple frames per read, comments and data-only JSON', () => {
+  const { exports } = loadBundle()
+  const parser = exports.createSseParser()
+  assert.deepEqual(parser.push('event: hello\nda'), [])
+  assert.deepEqual(parser.push('ta: {"ok":true,"n":1}\n'), [])
+  assert.deepEqual(parser.push('\n'), [{ event: 'hello', data: { ok: true, n: 1 } }])
+
+  assert.deepEqual(parser.push(': ping\n\n'), [], 'comment-only frames are heartbeats, not events')
+
+  const multiple = parser.push('event: event\ndata: {"a":1}\n\nevent: live\ndata: {"live":null}\n\n')
+  assert.deepEqual(multiple.map((frame) => frame.event), ['event', 'live'])
+  assert.deepEqual(multiple[1].data, { live: null })
+
+  const dataOnly = parser.push('data: {"k":"v"}\n\n')
+  assert.equal(dataOnly.length, 1)
+  assert.equal(dataOnly[0].event, 'message', 'a data-only frame keeps the default event name')
+  assert.deepEqual(dataOnly[0].data, { k: 'v' })
+
+  const crlf = parser.push('event: status\r\ndata: {"running":false}\r\n\r\n')
+  assert.deepEqual(crlf, [{ event: 'status', data: { running: false } }])
+
+  parser.reset()
+  assert.deepEqual(parser.push('event: hello\ndata: {}\n\n'), [{ event: 'hello', data: {} }])
+})
+
+test('hiding the tab aborts the stream and becoming visible reconnects from the saved fromSeq', async () => {
+  const fetchStub = createStreamingFetchStub({ handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  assert.equal(fetchStub.streams.length, 1)
+  assert.equal(fetchStub.streams[0].init.signal.aborted, false)
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [userEntry(0, 'hi')],
+    live: null
+  }))
+  await flush()
+  assert.equal(runtime.getState('main-1').nextSeq, 1)
+
+  runtime.setVisible('main-1', false)
+  assert.equal(fetchStub.streams[0].init.signal.aborted, true, 'hiding aborts the open stream')
+  assert.equal(runtime.getState('main-1').streaming, false)
+  assert.equal(scheduler.pending(), 0, 'hiding clears every update timer')
+
+  runtime.setVisible('main-1', true)
+  assert.equal(scheduler.pending(), 1, 'becoming visible reconnects immediately')
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.streams.length, 2)
+  const eventsCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}events`)
+  assert.equal(eventsCalls.at(-1).body.fromSeq, 1, 'the reconnect resumes from the saved cursor')
+  assert.equal(eventsCalls.at(-1).body.sessionId, 'side-1')
+
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+  assert.equal(scheduler.pending(), 0)
+})
+
+test('a non-streaming transport degrades to snapshot polling and keeps polling', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: {
+      ok: true,
+      inheritedEventCount: 0,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: [userEntry(0, 'hi')],
+      live: null
+    }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  const snapshotCalls = () => fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`)
+  let state = runtime.getState('main-1')
+  assert.equal(state.streamMode, 'poll', 'no readable body permanently degrades to polling')
+  assert.equal(state.streaming, false)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}events`).length, 1)
+  assert.equal(snapshotCalls().length, 1, 'the fallback pulls one snapshot immediately')
+  assert.equal(snapshotCalls()[0].body.fromSeq, 0)
+  assert.equal(scheduler.pending(), 1, 'polling continues after the fallback')
+
+  scheduler.runAll()
+  await flush()
+  assert.equal(snapshotCalls().length, 2, 'the poll loop keeps pulling')
+  state = runtime.getState('main-1')
+  assert.equal(state.nodes.length, 1)
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('stream: false forces snapshot polling without touching the events route', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: {
+      ok: true,
+      inheritedEventCount: 0,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: [],
+      live: null
+    }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub, { config: { stream: false } })
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  assert.equal(runtime.getState('main-1').streamMode, 'poll')
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}events`).length, 0)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
+  assert.equal(scheduler.pending(), 1)
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('a JSON not-found answer from the events route records the polling failure and stops', async () => {
+  const fetchStub = createStreamingFetchStub({
+    eventsMode: 'json',
+    handlers: streamingHandlers({
+      events: { ok: false, code: 'not-found', message: 'unknown side session' }
+    })
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  const state = runtime.getState('main-1')
+  assert.deepEqual(state.pollError, { code: 'not-found', message: 'unknown side session', params: {} })
+  assert.equal(state.streamMode, 'poll')
+  assert.equal(scheduler.pending(), 0, 'not-found stops all updates')
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 0)
+  await runtime.close('main-1')
+})
+
+test('a JSON body instead of an SSE stream counts as a failed connect and falls back', async () => {
+  const fetchStub = createStreamingFetchStub({
+    eventsMode: 'json-body',
+    handlers: streamingHandlers({
+      events: { ok: false, code: 'stream-unavailable', message: 'no stream here' }
+    })
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  const state = runtime.getState('main-1')
+  assert.equal(state.streamMode, 'poll')
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
+  assert.equal(scheduler.pending(), 1)
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('a silent stream falls back to polling after streamHelloMs instead of hanging', async () => {
+  const fetchStub = createStreamingFetchStub({ eventsMode: 'hanging', handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub, { config: { streamHelloMs: 5 } })
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.streams.length, 1)
+  assert.equal(scheduler.pending(), 1, 'the hello deadline is armed')
+
+  scheduler.runAll()
+  await flush()
+  const state = runtime.getState('main-1')
+  assert.equal(fetchStub.streams[0].init.signal.aborted, true, 'the buffering stream is aborted')
+  assert.equal(state.streamMode, 'poll')
+  assert.equal(state.streaming, false)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
+  assert.equal(scheduler.pending(), 1, 'polling takes over')
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('status and error frames update the panel the way a snapshot would', async () => {
+  const fetchStub = createStreamingFetchStub({ handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [],
+    live: null
+  }))
+  await flush()
+  assert.equal(runtime.getState('main-1').running, true)
+
+  fetchStub.streams[0].queue.push(sseFrame('status', { status: 'idle', running: false }))
+  await flush()
+  let state = runtime.getState('main-1')
+  assert.equal(state.running, false)
+  assert.equal(state.status, 'idle')
+
+  fetchStub.streams[0].queue.push(sseFrame('error', { message: 'turn failed' }))
+  await flush()
+  state = runtime.getState('main-1')
+  assert.equal(state.lastError, 'turn failed')
+
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('a stream EOF after hello catches up by snapshot and reconnects with backoff', async () => {
+  const fetchStub = createStreamingFetchStub({ handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [userEntry(0, 'hi')],
+    live: null
+  }))
+  await flush()
+  fetchStub.streams[0].queue.close()
+  await flush()
+
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1, 'EOF triggers one catch-up snapshot')
+  assert.equal(scheduler.pending(), 1, 'EOF arms a reconnect timer')
+  assert.equal(runtime.getState('main-1').streaming, false)
+
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.streams.length, 2, 'the stream reconnects after EOF')
+  const eventsCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}events`)
+  assert.equal(eventsCalls.at(-1).body.fromSeq, 1)
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('the panel renders the live attempt after committed rows with streaming markdown and no thinking indicator', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const { registered } = applyBundle(exports)
+  const bodyRegistration = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const t = (key) => key
+  const state = {
+    mainId: 'main-1',
+    sessionId: 'side-1',
+    inheritedEventCount: 0,
+    nextSeq: 5,
+    entries: [],
+    nodes: [
+      { kind: 'user', seq: 0, time: 1700000000000, text: 'question' },
+      { kind: 'assistant', seq: 1, time: 1700000001000, blocks: [{ kind: 'text', text: 'committed answer' }] }
+    ],
+    visible: true,
+    running: true,
+    status: 'running',
+    lastError: null,
+    error: null,
+    pollError: null,
+    sending: false,
+    draft: '',
+    pending: [],
+    live: {
+      revision: 3,
+      activeAttempt: {
+        attemptId: 'attempt-1',
+        turn: 1,
+        step: 1,
+        nextIndex: 2,
+        blocks: [
+          { kind: 'reasoning', text: 'why' },
+          { kind: 'text', text: 'streaming answer' },
+          { kind: 'tool-call', callId: 'call-1', name: 'bash', argsRaw: '{}' }
+        ]
+      }
+    },
+    streamMode: 'stream',
+    streaming: true,
+    timer: null,
+    onVisibility: null
+  }
+  const runtime = {
+    subscribe: () => () => {},
+    getVersion: () => 0,
+    open: () => {},
+    setVisible: () => {},
+    getState: (id) => (id === 'main-1' ? state : null),
+    setDraft: () => {},
+    send: async () => {},
+    cancel: async () => {}
+  }
+  const bodyElement = bodyRegistration.component({
+    runtime,
+    sessionId: 'main-1',
+    t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  assert.equal(typeof bodyElement.type, 'function', 'the tab body renders the panel component')
+  const tree = bodyElement.type(bodyElement.props)
+  const body = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-body')
+  assert.ok(body !== undefined, 'the panel body renders')
+  const rows = body.children[0]
+  assert.equal(rows.length, 3, 'committed rows plus the live assistant row')
+  assert.equal(rows[0].props.text, 'question')
+  assert.equal(rows[1].props.blocks[0].text, 'committed answer')
+  assert.equal(rows[1].props.streaming, undefined, 'committed rows are not streaming')
+  assert.equal(rows[2].props.key, 'live', 'the live attempt renders after the committed rows')
+  assert.equal(rows[2].props.streaming, true)
+  assert.deepEqual(rows[2].props.blocks.map((block) => block.kind), ['reasoning', 'text', 'tool-call'])
+  assert.equal(body.children[2], null, 'thinking is suppressed while live blocks render')
+
+  const committedRow = rows[1].type(rows[1].props)
+  const committedMarkdown = findElement(committedRow, (element) => element.props !== undefined && element.props.text === 'committed answer')
+  assert.ok(committedMarkdown !== undefined)
+  const committedMarkdownText = committedMarkdown.type(committedMarkdown.props)
+  assert.equal(committedMarkdownText.props.streaming, false)
+
+  const liveRow = rows[2].type(rows[2].props)
+  const liveMarkdown = findElement(liveRow, (element) => element.props !== undefined && element.props.text === 'streaming answer')
+  assert.ok(liveMarkdown !== undefined)
+  const liveMarkdownText = liveMarkdown.type(liveMarkdown.props)
+  assert.equal(liveMarkdownText.props.streaming, true, 'the shell Markdown renderer receives streaming: true')
+
+  state.live = null
+  const settledTree = bodyElement.type(bodyElement.props)
+  const settledBody = findElement(settledTree, (element) => element.props !== undefined && element.props.className === 'sc-body')
+  assert.equal(settledBody.children[0].length, 2, 'the live row disappears with the settlement')
+  assert.ok(settledBody.children[2] !== null, 'the thinking indicator returns without live blocks')
+  assert.equal(settledBody.children[2].props.className, 'sc-thinking')
+})
+
+test('pollOnce stays a deterministic snapshot pull and applies the live field', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: {
+      ok: true,
+      inheritedEventCount: 0,
+      running: true,
+      status: 'running',
+      lastError: null,
+      entries: [],
+      live: {
+        revision: 7,
+        activeAttempt: {
+          attemptId: 'attempt-1',
+          turn: 1,
+          step: 1,
+          nextIndex: 1,
+          blocks: [{ kind: 'text', text: 'tok' }]
+        }
+      }
+    }
+  })
+  const { exports, scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  assert.equal(scheduler.pending(), 1, 'the stream connection is only scheduled, never run')
+  await runtime.pollOnce('main-1')
+  const state = runtime.getState('main-1')
+  assert.equal(state.live.revision, 7)
+  assert.equal(state.running, true)
+  assert.deepEqual(exports.liveBlocksOf(state), [{ kind: 'text', text: 'tok' }])
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
+  await runtime.close('main-1')
 })

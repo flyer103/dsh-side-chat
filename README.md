@@ -45,11 +45,12 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - **Inherits the agent** — same working directory, preset composition, tools, skills, model routing, sandbox mode and approval policy.
 - **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
 - **Isolates the transcript** — side-chat turns never appear in the main conversation, the session list, or the subagent catalog.
+- **Streams the reply** — assistant text, reasoning and tool calls render token by token from a live event stream while the turn runs; when the transport cannot stream, the tab falls back to polling.
 - **Destroys on close** — closing the tab disposes the agent and the host tries to remove its persisted artifact; a side chat cannot be reopened. Collapsing the sidebar or switching tabs only pauses it.
 
 ## Compatibility
 
-- DSH `0.2.1-rc.2` (Desktop profile, Web GUI) — the tested target. Verified in an isolated copy of the desktop profile: the plugin launches, all seven host routes answer, and the client bundle is served.
+- DSH `0.2.1-rc.2` (Desktop profile, Web GUI) — the tested target. This release was verified against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the plugin launches, all eight host routes answer (including the SSE route's JSON fallback), and the client bundle is served.
 - No `engines.dsh` and no DSH peer dependency are declared, so DSH does not version-gate installation. That is separate from the tested version: newer DSH releases are untested.
 - Web platform only (`dsh.client.platform: web`); no CLI/TUI surface.
 - Node.js `>= 22`; the plugin itself is dependency-free ESM with no `@deepseek-ai/*` imports.
@@ -62,7 +63,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - A closed tab cannot be restored: reopening the card starts a new side chat, whose agent is created on the next message.
 - P1, designed but not implemented: model picker, multiple side chats per session, surviving a GUI restart, approval rendering in the tab.
 - The inherited context is a snapshot taken at creation; later main-session turns are not pushed into an existing side chat.
-- Replies are not token-streamed: an assistant message appears when it commits, with a running indicator in between.
+- Token streaming rides on a streamable `fetch` response. If the page transport buffers the response (detected by a missing first frame), the tab falls back to snapshot polling: the running indicator returns and the reply still appears while it grows, at poll granularity.
 - The first side-chat request is roughly as large as the parent's next request (it carries the inherited history).
 
 ## Documentation
@@ -75,8 +76,8 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 
 | path | role |
 |---|---|
-| `lib/index.js` | host half: routes, fork seed, boundary injection, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, and the tab body (messages + composer) |
+| `lib/index.js` | host half: routes, live attempt accumulation and the SSE stream, fork seed, boundary injection, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the tab body (streaming messages + composer) and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` row |
 | `scripts/install.mjs` | idempotent installer/remover for a local checkout |
 | `dsh.plugin.json` | community manifest metadata; DSH does not read it (official display metadata comes from `package.json` and optional `locale/*.json`) |

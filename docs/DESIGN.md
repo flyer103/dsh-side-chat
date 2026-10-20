@@ -37,10 +37,18 @@ Delta against the existing community plugins:
    persisted artifact (a failed removal is logged; the close still succeeds and the orphan
    never appears in any list). A side chat cannot be reopened.
 8. **UI**: the side chat lives in a right-Sidebar tab (body fills the column): user bubbles +
-   assistant markdown, reasoning fold, tool chips with results, running/thinking state,
-   optimistic pending messages, Stop, auto-follow scrolling, `Enter` send / `Shift+Enter`
-   newline. Collapsing the column or switching tabs pauses polling and keeps the session;
-   closing the tab destroys it.
+   assistant markdown, reasoning fold, tool chips with results, **token-streamed assistant
+   output**, running/thinking state, optimistic pending messages, Stop, auto-follow scrolling,
+   `Enter` send / `Shift+Enter` newline. Collapsing the column or switching tabs pauses the
+   live updates and keeps the session; closing the tab destroys it.
+9. **Streaming**: the host folds `agent/assistant-stream` frames into a per-session live
+   attempt and pushes it (plus committed events, status and errors) over
+   `POST /side-chat/api/events` (SSE). The tab renders the active attempt as a normal
+   assistant row while it streams and swaps in the committed message when it settles. When a
+   stream cannot be established — no readable body, JSON refusal, or a transport that buffers
+   the response — the tab degrades to the existing `snapshot` polling, which also carries the
+   live attempt. Hiding the tab aborts the stream; showing it reconnects from the last seen
+   sequence with a fresh live baseline.
 
 ## P1 (designed, not implemented)
 
@@ -74,6 +82,25 @@ Delta against the existing community plugins:
   close still disposes and succeeds; the orphan never appears in any list.
 - **Token cost**: the side session inherits the parent history, so its first request is
   roughly as large as the parent's next request. Stated in the README.
+- **Streaming state is presentation only**: live frames come from the process-local
+  `agent/assistant-stream` feed and are never treated as durable history. A revision gap, a
+  host restart, or a reconnect invalidates the live attempt; the client re-baselines from the
+  `hello`/`snapshot` payload and the committed `assistant/message` stays authoritative.
+- **Stream/committed duplication**: the loop commits the settlement before emitting its
+  `end` frame, so the host clears the live attempt on the committed
+  `assistant/message`/`assistant/attempt` and emits `live: null` immediately before it
+  forwards that committed event's `event` frame. Both frames travel in the same paint, and
+  the client also reconciles defensively and may do one snapshot catch-up, so a dropped
+  frame cannot leave a stale streaming row or hide the final message.
+- **Buffering transports**: the Desktop IPC bridge and some proxies can buffer a whole
+  response. The client waits ~2.5 s for the `hello` frame and otherwise aborts the stream and
+  falls back to polling; a stream that drops after its baseline reconnects with backoff, and
+  two failed connects without a baseline degrade the tab to polling. A tab never runs both
+  paths at once.
+- **Concurrent stream connections**: one stream per parent session may be open from more than
+  one tab; the host fans the same frames out to every connection and cleans each one up on
+  request close, session close, or plugin unload. Live state is kept per side session even
+  when no stream is connected, so the snapshot fallback sees it too.
 
 ## Rollback
 

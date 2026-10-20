@@ -9,6 +9,7 @@ import {
   artifactDirectory,
   completedTurnPrefix,
   isSystemNoise,
+  LiveAttemptState,
   projectQueue,
   recentMainContext,
   routeHandler,
@@ -371,6 +372,7 @@ test('apply registers every contract route', () => {
     `${ROUTE_PREFIX}cancel`,
     `${ROUTE_PREFIX}close`,
     `${ROUTE_PREFIX}create`,
+    `${ROUTE_PREFIX}events`,
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
     `${ROUTE_PREFIX}snapshot`,
@@ -835,3 +837,428 @@ async function invokeHandler(handler, rawBody) {
   await done
   return { status: res.statusCode, headers: res.headers, rawBody: res.rawBody }
 }
+
+// --- live token streaming (host half) -------------------------------------
+
+function startFrame(attemptId, revision = 1, turn = 1, step = 1) {
+  return { type: 'start', attemptId, revision, turn, step }
+}
+
+function chunkFrame(attemptId, revision, index, chunk) {
+  return { type: 'chunk', attemptId, revision, index, time: 1000 + index, chunk }
+}
+
+function endFrame(attemptId, revision, index, outcome = { kind: 'abandoned' }) {
+  return { type: 'end', attemptId, revision, index, outcome }
+}
+
+function emitStream(runtime, agent, frame) {
+  const listener = runtime.listeners.get('agent/assistant-stream')
+  assert.equal(typeof listener, 'function', 'agent/assistant-stream listener is registered')
+  listener({ agent, frame })
+}
+
+function emitSessionEvent(runtime, session, event) {
+  const listener = runtime.listeners.get('session/event')
+  assert.equal(typeof listener, 'function', 'session/event listener is registered')
+  listener(session, event)
+}
+
+function makeStreamResponse() {
+  const chunks = []
+  const listeners = new Map()
+  return {
+    statusCode: undefined,
+    headers: undefined,
+    writableEnded: false,
+    chunks,
+    listeners,
+    writeHead(statusCode, headers) {
+      this.statusCode = statusCode
+      this.headers = headers
+    },
+    write(chunk) {
+      chunks.push(String(chunk))
+      return true
+    },
+    end(chunk) {
+      if (chunk !== undefined) chunks.push(String(chunk))
+      this.writableEnded = true
+    },
+    on(eventName, callback) {
+      listeners.set(eventName, callback)
+    },
+    off(eventName, callback) {
+      if (listeners.get(eventName) === callback) listeners.delete(eventName)
+    },
+    text() {
+      return chunks.join('')
+    },
+    frames() {
+      return parseSse(this.text())
+    },
+  }
+}
+
+function makeStreamRequest(rawBody) {
+  const listeners = new Map()
+  return {
+    method: 'POST',
+    listeners,
+    on(eventName, callback) {
+      listeners.set(eventName, callback)
+    },
+    off(eventName, callback) {
+      if (listeners.get(eventName) === callback) listeners.delete(eventName)
+    },
+    [Symbol.asyncIterator]: async function* () {
+      if (rawBody !== undefined) yield rawBody
+    },
+  }
+}
+
+function parseSse(text) {
+  const frames = []
+  for (const block of text.split('\n\n')) {
+    if (block === '') continue
+    const frame = { event: undefined, data: undefined, comment: false }
+    for (const line of block.split('\n')) {
+      if (line.startsWith(': ')) {
+        frame.comment = true
+      } else if (line.startsWith('event: ')) {
+        frame.event = line.slice('event: '.length)
+      } else if (line.startsWith('data: ')) {
+        frame.data = JSON.parse(line.slice('data: '.length))
+      }
+    }
+    frames.push(frame)
+  }
+  return frames
+}
+
+async function openStream(runtime, args) {
+  const route = runtime.routes.get(`${ROUTE_PREFIX}events`)
+  assert.ok(route !== undefined, 'route events is registered')
+  const req = makeStreamRequest(typeof args === 'string' ? args : JSON.stringify(args ?? {}))
+  const res = makeStreamResponse()
+  await route.handler(req, res)
+  return {
+    req,
+    res,
+    frames: () => res.frames(),
+    lastFrame: () => res.frames().at(-1),
+    close: () => req.listeners.get('close')?.(),
+  }
+}
+
+async function postRaw(runtime, routeName, rawBody) {
+  const route = runtime.routes.get(`${ROUTE_PREFIX}${routeName}`)
+  assert.ok(route !== undefined, `route ${routeName} is registered`)
+  const req = makeStreamRequest(rawBody)
+  const res = makeStreamResponse()
+  await route.handler(req, res)
+  const rawText = res.text()
+  return {
+    status: res.statusCode,
+    headers: res.headers,
+    rawBody: rawText,
+    body: rawText === '' ? undefined : JSON.parse(rawText),
+  }
+}
+
+async function startSideSession(runtime) {
+  const created = await post(runtime, 'create', { sourceId: 'main-1' })
+  assert.equal(created.body.ok, true)
+  const handle = runtime.handles.at(-1)
+  return { sessionId: created.body.sessionId, handle, agent: handle.agent }
+}
+
+test('LiveAttemptState folds start, deltas and block-end into ordered renderable blocks', () => {
+  const state = new LiveAttemptState()
+  assert.deepEqual(state.snapshot(), { revision: 0, activeAttempt: null })
+
+  assert.equal(state.accept(startFrame('attempt-1')), true)
+  state.accept(chunkFrame('attempt-1', 2, 0, { type: 'block-start', index: 0, blockType: 'reasoning' }))
+  state.accept(chunkFrame('attempt-1', 3, 1, { type: 'reasoning-delta', index: 0, text: 'thinking ' }))
+  state.accept(chunkFrame('attempt-1', 4, 2, { type: 'reasoning-delta', index: 0, text: 'hard' }))
+  state.accept(chunkFrame('attempt-1', 5, 3, { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thinking hard' } }))
+  state.accept(chunkFrame('attempt-1', 6, 4, { type: 'block-start', index: 1, blockType: 'text' }))
+  state.accept(chunkFrame('attempt-1', 7, 5, { type: 'text-delta', index: 1, text: 'Hello' }))
+  state.accept(chunkFrame('attempt-1', 8, 6, { type: 'text-delta', index: 1, text: ' world' }))
+  // Tool calls may stream without a preceding block-start.
+  state.accept(chunkFrame('attempt-1', 9, 7, { type: 'tool-call-delta', index: 2, id: 'call-1', name: 'bash', argumentsDelta: '{"cmd":' }))
+  state.accept(chunkFrame('attempt-1', 10, 8, { type: 'tool-call-delta', index: 2, id: 'call-1', argumentsDelta: '"ls"}' }))
+  // Usage and finish chunks are accepted by the assembler but never render.
+  state.accept(chunkFrame('attempt-1', 11, 9, { type: 'usage', usage: {} }))
+  state.accept(chunkFrame('attempt-1', 12, 10, { type: 'finish', reason: 'stop' }))
+
+  const live = state.snapshot()
+  assert.equal(live.revision, 12)
+  assert.deepEqual(live.activeAttempt, {
+    attemptId: 'attempt-1',
+    turn: 1,
+    step: 1,
+    nextIndex: 11,
+    blocks: [
+      { kind: 'reasoning', text: 'thinking hard' },
+      { kind: 'text', text: 'Hello world' },
+      { kind: 'tool-call', callId: 'call-1', name: 'bash', argsRaw: '{"cmd":"ls"}' },
+    ],
+  })
+
+  // block-end finalizes: re-close and post-finalize deltas are ignored
+  state.accept(chunkFrame('attempt-1', 13, 11, { type: 'block-end', index: 1, block: { type: 'text', text: 'Hello world' } }))
+  state.accept(chunkFrame('attempt-1', 14, 12, { type: 'text-delta', index: 1, text: '!!!' }))
+  assert.deepEqual(state.snapshot().activeAttempt.blocks[1], { kind: 'text', text: 'Hello world' })
+
+  state.accept(endFrame('attempt-1', 15, 13))
+  assert.deepEqual(state.snapshot(), { revision: 15, activeAttempt: null })
+
+  // Unknown block types never render, empty text blocks are omitted, and a
+  // tool call without id/name defaults them to empty strings.
+  const other = new LiveAttemptState()
+  other.accept(startFrame('attempt-2'))
+  other.accept(chunkFrame('attempt-2', 2, 0, { type: 'block-start', index: 0, blockType: 'image' }))
+  other.accept(chunkFrame('attempt-2', 3, 1, { type: 'block-end', index: 0, block: { type: 'image' } }))
+  other.accept(chunkFrame('attempt-2', 4, 2, { type: 'block-start', index: 1, blockType: 'text' }))
+  other.accept(chunkFrame('attempt-2', 5, 3, { type: 'tool-call-delta', index: 2, argumentsDelta: '{}' }))
+  assert.deepEqual(other.snapshot().activeAttempt.blocks, [
+    { kind: 'tool-call', callId: '', name: '', argsRaw: '{}' },
+  ])
+})
+
+test('LiveAttemptState ignores malformed frames and clears the attempt on a revision gap', () => {
+  const state = new LiveAttemptState()
+  assert.equal(state.accept(null), false)
+  assert.equal(state.accept('nope'), false)
+  assert.equal(state.accept({ type: 'chunk', revision: 1.5, index: 0, attemptId: 'a' }), false)
+  assert.equal(state.accept({ type: 'mystery', revision: 1 }), false)
+  assert.deepEqual(state.snapshot(), { revision: 0, activeAttempt: null })
+
+  state.accept(startFrame('attempt-1'))
+  state.accept(chunkFrame('attempt-1', 2, 0, { type: 'block-start', index: 0, blockType: 'text' }))
+  state.accept(chunkFrame('attempt-1', 3, 1, { type: 'text-delta', index: 0, text: 'partial' }))
+  assert.equal(state.snapshot().activeAttempt.nextIndex, 2)
+
+  // A revision gap invalidates the baseline and drops the partial attempt.
+  assert.equal(state.accept(chunkFrame('attempt-1', 9, 2, { type: 'text-delta', index: 0, text: 'tail' })), true)
+  assert.deepEqual(state.snapshot(), { revision: 9, activeAttempt: null })
+
+  // Dense revisions with an out-of-order frame index are dropped too.
+  state.accept(startFrame('attempt-1', 10))
+  state.accept(chunkFrame('attempt-1', 11, 5, { type: 'text-delta', index: 0, text: 'x' }))
+  assert.deepEqual(state.snapshot(), { revision: 11, activeAttempt: null })
+
+  // A restarted agent lifecycle (revision back to 1) resets the baseline.
+  state.accept(startFrame('attempt-2', 1, 2, 1))
+  assert.deepEqual(state.snapshot(), {
+    revision: 1,
+    activeAttempt: { attemptId: 'attempt-2', turn: 2, step: 1, nextIndex: 0, blocks: [] },
+  })
+})
+
+test('snapshot serves the live attempt and drops it when the message commits', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  emitStream(runtime, agent, startFrame('attempt-1'))
+  emitStream(runtime, agent, chunkFrame('attempt-1', 2, 0, { type: 'block-start', index: 0, blockType: 'text' }))
+  emitStream(runtime, agent, chunkFrame('attempt-1', 3, 1, { type: 'text-delta', index: 0, text: 'streaming ' }))
+
+  const during = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(during.body.live.revision, 3)
+  assert.equal(during.body.live.activeAttempt.attemptId, 'attempt-1')
+  assert.equal(during.body.live.activeAttempt.nextIndex, 2)
+  assert.deepEqual(during.body.live.activeAttempt.blocks, [{ kind: 'text', text: 'streaming ' }])
+
+  // A committed message for a different turn/step must not settle the attempt.
+  const unrelated = agent.session.append('assistant/message', { turn: 2, step: 1, message: assistantMsg('a8', 'other turn') }, { surfaceOp: 'append' })
+  emitSessionEvent(runtime, agent.session, unrelated)
+  assert.equal((await post(runtime, 'snapshot', { sessionId })).body.live.activeAttempt.attemptId, 'attempt-1')
+
+  // The matching committed message settles it immediately, before the end frame.
+  const committed = agent.session.append('assistant/message', { turn: 1, step: 1, message: assistantMsg('a9', 'streaming answer') }, { surfaceOp: 'append' })
+  emitSessionEvent(runtime, agent.session, committed)
+  const after = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(after.body.live.activeAttempt, null)
+  assert.equal(after.body.live.revision, 3)
+
+  // The matching end frame is harmless after settlement.
+  emitStream(runtime, agent, endFrame('attempt-1', 4, 2, { kind: 'committed', eventType: 'assistant/message', seq: committed.seq }))
+  const ended = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(ended.body.live.activeAttempt, null)
+  assert.equal(ended.body.live.revision, 4)
+})
+
+test('events route streams hello, live, committed event, status and error frames', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  const savedSetInterval = globalThis.setInterval
+  const savedClearInterval = globalThis.clearInterval
+  const intervals = []
+  globalThis.setInterval = (callback, delayMs) => {
+    const handle = {
+      callback,
+      delayMs,
+      unrefCalled: false,
+      cleared: false,
+      unref() {
+        this.unrefCalled = true
+        return this
+      },
+    }
+    intervals.push(handle)
+    return handle
+  }
+  globalThis.clearInterval = (handle) => {
+    if (handle !== null && typeof handle === 'object') handle.cleared = true
+  }
+  try {
+    const stream = await openStream(runtime, { sessionId })
+    const { res } = stream
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.headers['Content-Type'], 'text/event-stream; charset=utf-8')
+    assert.equal(res.headers['Cache-Control'], 'no-cache, no-transform')
+    assert.equal(res.headers.Connection, 'keep-alive')
+    assert.equal(res.headers['X-Accel-Buffering'], 'no')
+
+    const hello = stream.frames()[0]
+    assert.equal(hello.event, 'hello')
+    assert.equal(hello.data.ok, true)
+    assert.equal(hello.data.inheritedEventCount, 4)
+    assert.equal(hello.data.status, 'idle')
+    assert.equal(hello.data.running, false)
+    assert.equal(hello.data.lastError, null)
+    assert.equal(hello.data.truncated, false)
+    assert.equal(hello.data.live, null)
+    assert.equal(hello.data.entries[0].seq, 4)
+    assert.ok(hello.data.entries.some((entry) => entry.type === 'user/message' && entry.data.source.kind === 'plugin:side-chat'))
+
+    emitStream(runtime, agent, startFrame('attempt-1'))
+    emitStream(runtime, agent, chunkFrame('attempt-1', 2, 0, { type: 'block-start', index: 0, blockType: 'text' }))
+    emitStream(runtime, agent, chunkFrame('attempt-1', 3, 1, { type: 'text-delta', index: 0, text: 'streaming' }))
+    const liveFrame = stream.lastFrame()
+    assert.equal(liveFrame.event, 'live')
+    assert.equal(liveFrame.data.live.revision, 3)
+    assert.deepEqual(liveFrame.data.live.activeAttempt.blocks, [{ kind: 'text', text: 'streaming' }])
+
+    const committed = agent.session.append('assistant/message', { turn: 1, step: 1, message: assistantMsg('a9', 'streaming answer') }, { surfaceOp: 'append' })
+    emitSessionEvent(runtime, agent.session, committed)
+    const framesAfterCommit = stream.frames()
+    const settled = framesAfterCommit.filter((frame) => frame.event === 'live').at(-1)
+    assert.equal(settled.data.live.activeAttempt, null)
+    const eventFrame = framesAfterCommit.filter((frame) => frame.event === 'event').at(-1)
+    assert.equal(eventFrame.data.entry.seq, committed.seq)
+    assert.equal(eventFrame.data.entry.type, 'assistant/message')
+    assert.equal(eventFrame.data.entry.surfaceOp, 'append')
+
+    agent.status = 'running'
+    runtime.listeners.get('agent/status')({ agent, status: 'running' })
+    assert.deepEqual(stream.lastFrame(), { event: 'status', data: { status: 'running', running: true }, comment: false })
+
+    runtime.listeners.get('agent/error')({ agent, error: new Error('model exploded') })
+    assert.deepEqual(stream.lastFrame(), { event: 'error', data: { message: 'model exploded' }, comment: false })
+    assert.equal((await post(runtime, 'snapshot', { sessionId })).body.lastError, 'model exploded')
+
+    assert.equal(intervals.length, 1)
+    assert.equal(intervals[0].delayMs, 15000)
+    assert.equal(intervals[0].unrefCalled, true)
+    intervals[0].callback()
+    assert.ok(res.text().endsWith(': ping\n\n'))
+
+    stream.close()
+    assert.equal(res.writableEnded, true)
+    assert.equal(intervals[0].cleared, true)
+    const writesAfterClose = res.chunks.length
+    emitStream(runtime, agent, startFrame('attempt-2', 4, 2, 1))
+    runtime.listeners.get('agent/status')({ agent, status: 'idle' })
+    assert.equal(res.chunks.length, writesAfterClose)
+  } finally {
+    globalThis.setInterval = savedSetInterval
+    globalThis.clearInterval = savedClearInterval
+  }
+})
+
+test('events hello carries live state folded before the stream connected', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  emitStream(runtime, agent, startFrame('attempt-1'))
+  emitStream(runtime, agent, chunkFrame('attempt-1', 2, 0, { type: 'block-start', index: 0, blockType: 'text' }))
+  emitStream(runtime, agent, chunkFrame('attempt-1', 3, 1, { type: 'text-delta', index: 0, text: 'early' }))
+
+  const stream = await openStream(runtime, { sessionId })
+  assert.deepEqual(stream.frames()[0].data.live, {
+    revision: 3,
+    activeAttempt: { attemptId: 'attempt-1', turn: 1, step: 1, nextIndex: 2, blocks: [{ kind: 'text', text: 'early' }] },
+  })
+
+  emitStream(runtime, agent, chunkFrame('attempt-1', 4, 2, { type: 'text-delta', index: 0, text: ' more' }))
+  assert.deepEqual(stream.lastFrame().data.live.activeAttempt.blocks, [{ kind: 'text', text: 'early more' }])
+  stream.close()
+})
+
+test('events route answers JSON failures and honors a requested fromSeq', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  const unknown = await post(runtime, 'events', { sessionId: 'side-chat-missing' })
+  assert.equal(unknown.status, 200)
+  assert.equal(unknown.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.deepEqual(unknown.body, { ok: false, code: 'not-found' })
+
+  const malformed = await postRaw(runtime, 'events', '{not json')
+  assert.equal(malformed.status, 200)
+  assert.equal(malformed.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.equal(malformed.body.ok, false)
+  assert.equal(malformed.body.code, 'internal')
+  assert.match(malformed.body.message, /invalid request body/)
+
+  const nonObject = await postRaw(runtime, 'events', '[]')
+  assert.equal(nonObject.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.equal(nonObject.body.code, 'internal')
+
+  const noBody = await postRaw(runtime, 'events', '')
+  assert.equal(noBody.body.code, 'not-found')
+
+  // A requested fromSeq raises the hello floor above the inherited prefix.
+  const stream = await openStream(runtime, { sessionId, fromSeq: 5 })
+  const hello = stream.frames()[0]
+  assert.equal(hello.event, 'hello')
+  assert.equal(hello.data.inheritedEventCount, 4)
+  assert.deepEqual(hello.data.entries, [])
+  const committed = agent.session.append('user/message', userMsg('u9', 'post-floor'), { surfaceOp: 'append' })
+  emitSessionEvent(runtime, agent.session, committed)
+  const eventFrame = stream.frames().find((frame) => frame.event === 'event')
+  assert.equal(eventFrame.data.entry.seq, committed.seq)
+  stream.close()
+})
+
+test('close and plugin unload end open event streams', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId } = await startSideSession(runtime)
+
+  const first = await openStream(runtime, { sessionId })
+  assert.equal(first.res.writableEnded, false)
+  assert.deepEqual((await post(runtime, 'close', { sessionId })).body, { ok: true })
+  assert.equal(first.res.writableEnded, true)
+  assert.equal(first.req.listeners.has('close'), false)
+
+  const recreated = await post(runtime, 'create', { sourceId: 'main-1' })
+  assert.equal(recreated.body.ok, true)
+  const second = await openStream(runtime, { sessionId: recreated.body.sessionId })
+  assert.equal(second.res.writableEnded, false)
+  const cleanup = runtime.effects.at(-1)
+  assert.equal(typeof cleanup, 'function')
+  cleanup()
+  assert.equal(second.res.writableEnded, true)
+  assert.equal(second.req.listeners.has('close'), false)
+  // Unloading twice is harmless and the sessions were already disposed.
+  cleanup()
+})

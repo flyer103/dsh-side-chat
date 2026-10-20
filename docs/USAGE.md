@@ -111,7 +111,8 @@ Restart DSH (quit and reopen the Desktop app, or restart the `dsh web` process).
 3. Send the first message. That send creates the side session: it forks the parent's
    context, injects the boundary message, and starts the agent.
 4. Keep talking, stop a running turn, or close the tab. Collapsing the sidebar or switching
-   to another tab only pauses polling and keeps the session; closing the tab destroys it.
+   to another tab only pauses the live updates and keeps the session; closing the tab
+   destroys it.
 
 A side chat is created lazily. Opening and closing the tab without sending a message
 produces no session, no model request, and no cost.
@@ -176,10 +177,10 @@ permission rows. It also inherits:
   though the process may still hold the agent; treat a refresh as the end of that side chat
   (see Known limitations).
 - The tab does not attach to the session through the generic client `sessions` service: a
-  parentless subagent-origin session is not addressable there. Its only message source is
-  the host's read-only `/side-chat/api/snapshot` route, which answers for sessions this
-  plugin created and returns `not-found` for anything else — the tab cannot read other
-  sessions.
+  parentless subagent-origin session is not addressable there. Its message sources are the
+  host's live `/side-chat/api/events` stream and the read-only
+  `/side-chat/api/snapshot` polling route; both answer only for sessions this plugin
+  created and return `not-found` for anything else — the tab cannot read other sessions.
 
 ## Mutation semantics — the point of this plugin
 
@@ -208,8 +209,9 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - The tab body has a status bar (status dot plus the localized status — Not created yet /
   Running… / Sending… / Idle, or 尚未创建 / 运行中 / 发送中 / 空闲 — and the localized queue
   count while messages queue), the message list, and the composer.
-- Messages: user bubbles with timestamps; assistant Markdown (reasoning folded, tool calls
-  folded with their results); running/thinking indicator; optimistic pending messages;
+- Messages: user bubbles with timestamps; assistant Markdown streamed token by token while
+  the turn runs (reasoning folded, tool calls folded with their arguments and results);
+  running/thinking indicator when no live text is visible yet; optimistic pending messages;
   error banner. Markdown uses the shell's renderer when available and a built-in fallback
   otherwise.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
@@ -220,19 +222,34 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - One side-chat tab per parent session and sidebar pane; each session keeps its own tab
   state. The tab type sets `keepMounted`, so switching tabs, switching sessions, collapsing
   the column or changing dock mode preserves the transcript, scroll position and draft.
-- Collapsing the sidebar or switching to another tab makes the tab invisible: polling
-  pauses and the agent and transcript are kept. Closing the tab is the destructive action
+- Collapsing the sidebar or switching to another tab makes the tab invisible: live updates
+  pause and the agent and transcript are kept. Closing the tab is the destructive action
   (see lifecycle).
 
 ### How messages reach the tab
 
-The tab polls the host (`/side-chat/api/snapshot`) — roughly every 0.4 s while the side
-agent runs and every 1.5 s when idle — but only while the tab is visible (its right sidebar
-is expanded, it is the active tab, and the browser tab is visible). It renders
-**committed** session events: a reply appears when the assistant message commits, not token
-by token, and the running indicator plus the optimistic pending bubble cover the in-between
-state. Hiding the tab, collapsing the column or hiding the browser tab pauses polling; it
-resumes later from the last seen sequence, so no history is lost.
+While the tab is visible it keeps one live connection open: `POST
+/side-chat/api/events`, an SSE stream carrying an opening baseline (fork floor, committed
+events, current status and the in-flight assistant attempt), every newly committed session
+event, agent status/error notifications, and a `live` replacement for the attempt that is
+currently being generated. The tab renders that attempt — reasoning, tool-call arguments
+and Markdown text — as it arrives, so a reply types itself into the panel; when the
+attempt settles, the committed `assistant/message` replaces the live row. The host clears
+the live attempt on commit (and says so on the stream), so the streaming row and the
+committed row never both render.
+
+A hidden tab aborts the stream — its right sidebar is collapsed, it is not the active tab,
+or the browser tab is hidden — and reconnects with a fresh baseline when it becomes
+visible again. The baseline includes the in-flight attempt, so text produced while the tab
+was hidden is recovered.
+
+If the transport cannot stream — no readable response body, a JSON refusal, or a response
+that buffers and delivers no opening frame within about 2.5 s (for example a proxied or
+bridged page) — that tab permanently falls back to `/side-chat/api/snapshot` polling:
+roughly every 0.4 s while the side agent runs and every 1.5 s when idle. The snapshot also
+carries the in-flight attempt, so fallback tabs still see text grow, at poll granularity;
+the running indicator and the optimistic pending bubble cover the rest. A tab never runs
+both paths at once, and a stream that drops after its baseline reconnects with backoff.
 
 ## Localization
 
@@ -274,7 +291,7 @@ interactive confirmation for side chats that need to write files or run commands
 |---|---|
 | open the guide card | client tab state only; no agent |
 | first send | create: fork seed, snapshot, boundary message, agent |
-| collapse sidebar / switch tab | polling pauses; tab state, draft and the side session are kept |
+| collapse sidebar / switch tab | live updates pause; tab state, draft and the side session are kept |
 | close the tab | client clears the tab state, then calls `close` if a side session exists; host removes the handle before disposing it |
 | close during a running turn | dispose cancels the turn; the handle is gone |
 | close result | the agent is disposed; the host then deletes the side session's own persisted directory from the Host process with `node:fs/promises.rm` (best effort, guarded to that directory) |
@@ -289,9 +306,11 @@ a tab that never sent a message only discards the empty client tab. A racing
 
 ## Compatibility
 
-- Verified target: DSH `0.2.1-rc.2`, Desktop profile, Web GUI. Verified in an isolated copy of
-  the desktop profile: the plugin launches, the seven host routes answer, and the client
-  bundle is served.
+- Verified target: DSH `0.2.1-rc.2`, Desktop profile, Web GUI. This release was verified
+  against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the
+  plugin launches, all eight host routes answer (including the SSE route's JSON fallback),
+  and the client bundle is served. The stream frame contract is covered by the host/client
+  unit tests and an in-process end-to-end check over a real HTTP server.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -301,8 +320,8 @@ a tab that never sent a message only discards the empty client tab. A racing
   read that file.
 - Node.js `>= 22` for the repository tooling; the plugin code itself is dependency-free
   ESM.
-- The host and client halves share no imports, only the JSON routes in
-  [CONTRACT.md](CONTRACT.md).
+- The host and client halves share no imports, only the routes in
+  [CONTRACT.md](CONTRACT.md) — JSON calls plus one SSE event stream.
 
 ## Uninstall and rollback
 
@@ -356,7 +375,8 @@ curl -s -X POST "<dsh-web-base-url>/side-chat/api/list" \
 
 It may be waiting for an approval its policy requires the human to answer (see the
 approval section), or a tool is still running. Press Stop to cancel the turn. Check that the
-tab is the active tab in an expanded right sidebar; a hidden tab deliberately stops polling.
+tab is the active tab in an expanded right sidebar; a hidden tab deliberately stops live
+updates.
 
 **A refresh lost the side chat.**
 
@@ -365,9 +385,12 @@ reload. Reopen the guide card; a new side chat is created on the next message.
 
 **A reply appears all at once instead of streaming.**
 
-Expected: the tab renders committed session events from the snapshot route, so an assistant
-message shows up when the turn commits. The running indicator shows progress in the
-meantime.
+The tab tries the live event stream first. If the page transport buffers responses, or the
+host cannot open the stream, the tab detects the missing opening frame and falls back to
+snapshot polling for that tab; replies then arrive at poll granularity or, at worst, when
+they commit. Reload the page to retry the stream. If streaming never works, check the
+browser devtools network panel: `/side-chat/api/events` should be an open request with
+`text/event-stream`, and the host log should show no route registration warning.
 
 **`dsh plugin --profile desktop add ...` fails.**
 
@@ -392,8 +415,10 @@ is about a dependency, not this plugin.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
   own session log can be left on disk as an orphan when removal fails. It is never listed in
   the GUI or session list.
-- **Replies are not token-streamed.** The tab polls committed events; an assistant reply
-  appears when its message commits, with a running indicator before that.
+- **Token streaming needs a streamable response.** The browser GUI and the Desktop window
+  stream normally; if a transport buffers the response (detected by a missing opening frame
+  after ~2.5 s), the tab falls back to polling committed events, so replies then appear at
+  poll granularity or on commit.
 - **History is not refreshed.** The snapshot is taken once, at creation.
 - **P1 items are designed but not implemented:** model picker for the side session, multiple
   concurrent side chats per parent, side-session history across a GUI restart, approval
@@ -404,8 +429,8 @@ is about a dependency, not this plugin.
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes, fork seed + recent-context snapshot, boundary injection, per-source session registry, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the tab body (snapshot rendering, composer, RPC calls) and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-source session registry, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the tab body (SSE/poll message sources, streaming rendering, composer, RPC calls) and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |

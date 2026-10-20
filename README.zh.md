@@ -45,11 +45,12 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - **继承 agent**：相同工作目录、preset 组合、工具、技能、模型路由、sandbox 模式与审批策略。
 - **真实改文件**：write / edit / bash 的改动落在同一工作区，主会话能看到。
 - **隔离 transcript**：侧边会话的对话不写主会话、不进会话列表、不进 subagent 目录。
+- **流式输出**：assistant 文本、思考与工具调用在生成过程中逐 token 渲染（实时事件流）；传输不支持流式时自动回退到轮询。
 - **关闭即销毁**：关闭 tab 时 agent 被 dispose，host 会尝试删除它的落盘产物；侧边会话无法再次打开。收起侧边栏或切换 tab 只是暂停。
 
 ## 兼容性
 
-- 在 DSH `0.2.1-rc.2`（Desktop profile，Web GUI）上验证：在 desktop profile 的隔离副本里实测插件启动、7 条 host 路由响应、client bundle 正常 serve。
+- 在 DSH `0.2.1-rc.2`（Desktop profile，Web GUI）上验证：本版本在隔离的 DSH home 里用全新 `web` profile 起真实 `dsh web` 进程实测——插件启动、8 条 host 路由均有响应（含 SSE 路由的 JSON 回退）、client bundle 正常 serve。
 - 本包**未声明** `engines.dsh` / DSH peer 依赖，因此安装时没有版本阻断；这与「已验证版本」是两件事——更新的 DSH 版本未经验证。
 - 仅 Web 平台（`dsh.client.platform: web`），没有 CLI/TUI 界面。
 - Node.js `>= 22`；插件本身是零依赖 ESM，不 import 任何 `@deepseek-ai/*`。
@@ -62,7 +63,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - tab 关闭后无法恢复：重新打开引导页卡片会开始一个新的侧边会话，agent 在下次发消息时才创建。
 - P1 已设计未实现：模型选择器、单会话多个侧边会话、GUI 重启后恢复侧边会话、tab 内审批呈现。
 - 继承的上下文是创建时的快照，之后主会话的新消息不会推给已存在的侧边会话。
-- 回复不是逐 token 流式渲染：assistant 消息在提交后才出现，期间显示运行中指示。
+- 流式输出依赖可流式读取的 `fetch` 响应；如果页面传输会把响应整体缓冲（以「首帧未按时到达」判定），tab 会回退到 snapshot 轮询：运行中指示仍在，回复仍会在生成过程中按轮询粒度浮现。
 - 首条消息的请求大小约等于主会话的下一次请求（因为它带着继承历史）。
 
 ## 文档
@@ -75,8 +76,8 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 
 | 路径 | 作用 |
 |---|---|
-| `lib/index.js` | host 半部：路由、fork seed、boundary 注入、close/dispose |
-| `lib/client.js` | client 半部：右侧边栏 tab 类型 + 引导页入口，以及 tab 正文（消息区 + composer） |
+| `lib/index.js` | host 半部：路由、实时尝试累积与 SSE 事件流、fork seed、boundary 注入、close/dispose |
+| `lib/client.js` | client 半部：右侧边栏 tab 类型 + 引导页入口，以及 tab 正文（流式消息区 + composer） |
 | `cordis.patch.yml` | bundle patch：插入 `dsh-side-chat` 行 |
 | `scripts/install.mjs` | 本地仓库的幂等安装/卸载脚本 |
 | `dsh.plugin.json` | 社区约定的清单元数据；DSH 不读取（官方展示元数据来自 `package.json` 与可选 `locale/*.json`） |
