@@ -1,6 +1,6 @@
 {
   "id": "dsh-side-chat",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "main": "./lib/index.js",
   "description": "Side chat for the DSH Web GUI: fork the current session into an ephemeral conversation that can really edit files in the same workspace, without polluting the main transcript.",
   "contributes": {
