@@ -495,6 +495,60 @@ function assistantEntry(seq, content) {
   }
 }
 
+/** One settled assistant event carrying provider usage directly on `data.usage`. */
+function usageEntry(seq, turn, step, usage) {
+  return {
+    seq,
+    type: 'assistant/message',
+    time: 1700000000000 + seq * 1000,
+    surfaceOp: 'append',
+    data: {
+      turn,
+      step,
+      message: { id: `assistant-${seq}`, content: [] },
+      usage
+    }
+  }
+}
+
+/** One settled assistant event whose usage only exists in its compact stream chunk. */
+function streamUsageEntry(seq, turn, step, usage) {
+  return {
+    seq,
+    type: 'assistant/attempt',
+    time: 1700000000000 + seq * 1000,
+    surfaceOp: 'append',
+    data: {
+      turn,
+      step,
+      stream: [
+        { type: 'chunk', chunk: { type: 'text-delta', text: 'answer' } },
+        { type: 'chunk', chunk: { type: 'usage', usage } }
+      ]
+    }
+  }
+}
+
+function retryStartedEntry(seq, turn, step) {
+  return {
+    seq,
+    type: 'llm/retry-started',
+    time: 1700000000000 + seq * 1000,
+    surfaceOp: 'append',
+    data: { turn, step }
+  }
+}
+
+function requestContextEntry(seq, contextWindow) {
+  return {
+    seq,
+    type: 'request/context',
+    time: 1700000000000 + seq * 1000,
+    surfaceOp: 'append',
+    data: { contextWindow }
+  }
+}
+
 function toolResultEntry(seq, callId, text, isError = false) {
   return {
     seq,
@@ -1804,4 +1858,452 @@ test('the close handler destroys only the side conversation of the closed tab oc
     globalThis.document = previousDocument
     globalThis.fetch = previousFetch
   }
+})
+
+// --- status dock metrics and rendering -------------------------------------
+
+test('usageBucketsOf and streamUsageOf normalize provider usage records defensively', () => {
+  const { exports } = loadBundle()
+  assert.deepEqual(exports.usageBucketsOf({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 2 }), {
+    uncachedInputTokens: 10,
+    outputTokens: 5,
+    cacheReadTokens: 3,
+    cacheWriteTokens: 2
+  })
+  assert.deepEqual(
+    exports.usageBucketsOf({ outputTokens: 7, inputTokens: -1, cacheReadTokens: Number.NaN, cacheWriteTokens: '3' }),
+    { uncachedInputTokens: 0, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'negative, non-finite and non-numeric fields are ignored'
+  )
+  assert.equal(exports.usageBucketsOf({}), null)
+  assert.equal(exports.usageBucketsOf(null), null)
+  assert.equal(exports.usageBucketsOf([]), null)
+  assert.equal(exports.usageBucketsOf('usage'), null)
+
+  const stream = [
+    { type: 'chunk', chunk: { type: 'text-delta', text: 'hi' } },
+    { type: 'chunk', chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } } },
+    { type: 'chunk', chunk: { type: 'usage', usage: { inputTokens: 8, outputTokens: 9, cacheReadTokens: 4 } } }
+  ]
+  assert.deepEqual(exports.streamUsageOf(stream), {
+    uncachedInputTokens: 8,
+    outputTokens: 9,
+    cacheReadTokens: 4,
+    cacheWriteTokens: 0
+  }, 'the last usable usage chunk wins')
+  assert.deepEqual(
+    exports.streamUsageOf([
+      { type: 'chunk', chunk: { type: 'usage', usage: { outputTokens: 3 } } },
+      { type: 'chunk', chunk: { type: 'usage', usage: {} } }
+    ]),
+    { uncachedInputTokens: 0, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'a trailing empty usage record falls back to the previous usable one'
+  )
+  assert.equal(exports.streamUsageOf([{ type: 'chunk', chunk: { type: 'usage', usage: {} } }]), null)
+  assert.equal(exports.streamUsageOf(undefined), null)
+  assert.equal(exports.streamUsageOf('stream'), null)
+})
+
+test('metricsOf folds only side-chat usage and replaces a re-settled turn step', () => {
+  const { exports } = loadBundle()
+  const entries = [
+    requestContextEntry(0, 64000),
+    usageEntry(1, 1, 1, { inputTokens: 800, outputTokens: 400, cacheReadTokens: 800 }),
+    usageEntry(3, 1, 1, { inputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 10 }),
+    usageEntry(4, 1, 1, { inputTokens: 40, outputTokens: 8 }),
+    streamUsageEntry(5, 2, 1, { inputTokens: 7, outputTokens: 2, cacheWriteTokens: 3 }),
+    requestContextEntry(6, 8000)
+  ]
+  assert.deepEqual(exports.metricsOf(entries, 3), {
+    uncachedInputTokens: 47,
+    outputTokens: 10,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 3,
+    billedInputTokens: 50,
+    totalTokens: 60,
+    pressureTokens: 10,
+    cacheHitPercent: '0',
+    contextWindow: 8000
+  })
+  assert.equal(exports.metricsOf([], 0), null, 'no usage sample means no dock')
+  assert.equal(exports.metricsOf(null, 0), null)
+  assert.equal(exports.metricsOf([null, 7, {}], 0), null, 'malformed entries are tolerated')
+  assert.equal(exports.metricsOf([requestContextEntry(0, 64000)], 0), null, 'a request window alone is not usage')
+  assert.equal(exports.metricsOf([usageEntry(2, 1, 1, { inputTokens: 0, outputTokens: 0 })], 0), null)
+  assert.equal(
+    exports.metricsOf([usageEntry(1, 1, 1, { inputTokens: 10, outputTokens: 2 })], 5),
+    null,
+    'inherited history below the fork floor is never billed to the side chat'
+  )
+})
+
+test('metricsOf closes the replaceable slot on llm/retry-started and tracks the newest pressure and window', () => {
+  const { exports } = loadBundle()
+  const entries = [
+    requestContextEntry(3, 64000),
+    usageEntry(4, 1, 1, { inputTokens: 100, outputTokens: 50, cacheReadTokens: 100 }),
+    retryStartedEntry(5, 1, 1),
+    usageEntry(6, 1, 1, { inputTokens: 10, outputTokens: 5 }),
+    requestContextEntry(7, 128000),
+    requestContextEntry(8, -4),
+    requestContextEntry(9, '64000')
+  ]
+  const metrics = exports.metricsOf(entries, 0)
+  assert.equal(metrics.uncachedInputTokens, 110, 'the retried attempt is kept, the replacement slot is closed')
+  assert.equal(metrics.outputTokens, 55)
+  assert.equal(metrics.cacheReadTokens, 100)
+  assert.equal(metrics.billedInputTokens, 210)
+  assert.equal(metrics.totalTokens, 265)
+  assert.equal(metrics.pressureTokens, 10, 'the newest sample supplies the prompt-side pressure')
+  assert.equal(metrics.cacheHitPercent, '48', '100 / 210 rounds to 48')
+  assert.equal(metrics.contextWindow, 128000, 'the newest positive request/context wins')
+})
+
+test('cacheHitText never rounds a partial hit up to 100 percent', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.cacheHitText(0, 0), null)
+  assert.equal(exports.cacheHitText(50, 0), null, 'nothing billed means no reading')
+  assert.equal(exports.cacheHitText(100, 100), '100')
+  assert.equal(exports.cacheHitText(120, 100), '100', 'a full hit caps at 100')
+  assert.equal(exports.cacheHitText(0, 100), '0')
+  assert.equal(exports.cacheHitText(50, 100), '50')
+  assert.equal(exports.cacheHitText(1, 3), '33')
+  assert.equal(exports.cacheHitText(9960, 10000), '99.6', 'a partial hit stays below 100')
+  assert.equal(exports.cacheHitText(9990, 10000), '99.9')
+})
+
+test('occupancyOf needs pressure and a window and prefers the entries window', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.occupancyOf(null, 1000), null)
+  assert.equal(exports.occupancyOf(undefined, 1000), null)
+  assert.equal(exports.occupancyOf({ pressureTokens: null, contextWindow: 1000 }, 1000), null)
+  assert.equal(exports.occupancyOf({ pressureTokens: 500, contextWindow: null }, null), null)
+  assert.equal(exports.occupancyOf({ pressureTokens: 500, contextWindow: null }, 0), null)
+  assert.deepEqual(exports.occupancyOf({ pressureTokens: 500, contextWindow: null }, 2000), {
+    percent: 25,
+    usedTokens: 500,
+    contextWindow: 2000
+  })
+  assert.deepEqual(exports.occupancyOf({ pressureTokens: 300, contextWindow: 1000 }, 2000), {
+    percent: 30,
+    usedTokens: 300,
+    contextWindow: 1000
+  }, 'the fold window beats the host baseline')
+  assert.deepEqual(exports.occupancyOf({ pressureTokens: 5000, contextWindow: 1000 }, null), {
+    percent: 100,
+    usedTokens: 5000,
+    contextWindow: 1000
+  }, 'occupancy is capped at 100')
+  assert.deepEqual(exports.occupancyOf({ pressureTokens: 0, contextWindow: null }, 1000), {
+    percent: 0,
+    usedTokens: 0,
+    contextWindow: 1000
+  })
+  assert.deepEqual(exports.occupancyOf({ pressureTokens: 1, contextWindow: 3 }, null), {
+    percent: 33,
+    usedTokens: 1,
+    contextWindow: 3
+  })
+})
+
+test('formatTokenCount and formatExactTokenCount use the dock locale keys', () => {
+  const { exports } = loadBundle()
+  const { registered, locale } = applyBundle(exports)
+  const t = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1').t
+  const DOCK_KEYS = [
+    'dock.tokens',
+    'dock.cacheHit',
+    'dock.contextAria',
+    'dock.contextTitle',
+    'dock.usageTitle',
+    'dock.usageTitleWithWrite',
+    'dock.thousand',
+    'dock.million',
+    'dock.groupSeparator'
+  ]
+  for (const key of DOCK_KEYS) {
+    assert.equal(typeof exports.ZH_DICT[key], 'string', `zh.${key} must exist`)
+    assert.notEqual(exports.ZH_DICT[key].trim(), '', `zh.${key} must not be empty`)
+    assert.equal(typeof exports.EN_DICT[key], 'string', `en.${key} must exist`)
+    assert.notEqual(exports.EN_DICT[key].trim(), '', `en.${key} must not be empty`)
+  }
+  assert.match(exports.ZH_DICT['dock.usageTitleWithWrite'], /\{cacheWrite\}/)
+  assert.match(exports.EN_DICT['dock.usageTitleWithWrite'], /\{cacheWrite\}/)
+  assert.equal(exports.ZH_DICT['dock.groupSeparator'], exports.EN_DICT['dock.groupSeparator'])
+
+  assert.equal(exports.formatTokenCount(t, 999), '999')
+  assert.equal(exports.formatTokenCount(t, 1234), '1.2K')
+  assert.equal(exports.formatTokenCount(t, 12345), '12.3K')
+  assert.equal(exports.formatTokenCount(t, 517000), '517K')
+  assert.equal(exports.formatTokenCount(t, 12_345_678), '12.3M')
+  assert.equal(exports.formatTokenCount(t, 0), '0')
+  assert.equal(exports.formatTokenCount(t, -5), '0')
+  assert.equal(exports.formatTokenCount(t, undefined), '0')
+  assert.equal(exports.formatExactTokenCount(t, 999), '999')
+  assert.equal(exports.formatExactTokenCount(t, 1234), '1,234')
+  assert.equal(exports.formatExactTokenCount(t, 1_234_567), '1,234,567')
+  assert.equal(exports.formatExactTokenCount(t, -3), '0')
+
+  locale.setLocale('en')
+  assert.match(t('dock.usageTitleWithWrite', { input: '1', cacheRead: '2', cacheWrite: '3', output: '4' }), /cache write 3/)
+  assert.equal(exports.formatTokenCount(t, 1234), '1.2K')
+  assert.equal(exports.formatExactTokenCount(t, 1234), '1,234')
+})
+
+test('statusDockOf renders token, cache-hit and context readings inside one sc-dock row', () => {
+  const { exports } = loadBundle()
+  const { registered } = applyBundle(exports)
+  const t = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1').t
+  const metrics = {
+    uncachedInputTokens: 1000,
+    outputTokens: 234,
+    cacheReadTokens: 3000,
+    cacheWriteTokens: 0,
+    billedInputTokens: 4000,
+    totalTokens: 4234,
+    pressureTokens: 4000,
+    cacheHitPercent: '75',
+    contextWindow: null
+  }
+  const dock = exports.statusDockOf(t, metrics, 8000)
+  assert.ok(dock !== undefined, 'metrics always render the dock')
+  assert.equal(dock.type, 'div')
+  assert.equal(dock.props.className, 'sc-dock')
+  const readings = dock.children[0]
+  assert.deepEqual(readings.map((child) => child.props.className), [
+    'sc-dock-stat',
+    'sc-dock-sep',
+    'sc-dock-stat',
+    'sc-dock-sep',
+    'sc-dock-context'
+  ])
+
+  const tokens = readings[0]
+  assert.equal(tokens.children[0], '4.2K tok')
+  assert.equal(tokens.props.title, '未缓存输入 1,000 · 缓存读取 3,000 · 输出 234', 'a provider without cache write uses the 3-bucket tooltip')
+  const cache = readings[2]
+  assert.equal(cache.children[0], '缓存命中 75%')
+  assert.equal(cache.props.title, tokens.props.title)
+  assert.equal(readings[1].children[0], '·')
+  assert.equal(readings[3].children[0], '·')
+
+  const context = readings[4]
+  assert.equal(context.props.role, 'img')
+  assert.equal(context.props['aria-label'], '上下文已用 50%')
+  assert.equal(context.props.title, '约 4,000 / 8,000 tok')
+  const ring = context.children[0]
+  assert.equal(ring.props.className, 'sc-dock-ring')
+  const [track, fill] = ring.children
+  assert.equal(track.props.className, 'sc-dock-ring-track')
+  assert.equal(fill.props.className, 'sc-dock-ring-fill')
+  const circumference = 2 * Math.PI * 5.5
+  assert.equal(fill.props.strokeDasharray, `${circumference * 50 / 100} ${circumference}`, 'the fill arc is proportional to the percent')
+  assert.equal(track.props.strokeDasharray, undefined, 'only the fill is dashed')
+  assert.equal(context.children[1].children[0], '50%')
+
+  const withCacheWrite = exports.statusDockOf(t, { ...metrics, cacheWriteTokens: 20 }, null)
+  assert.equal(
+    withCacheWrite.children[0][0].props.title,
+    '未缓存输入 1,000 · 缓存读取 3,000 · 缓存写入 20 · 输出 234',
+    'a provider with cache write uses the 4-bucket tooltip'
+  )
+  assert.equal(withCacheWrite.children[0].length, 3, 'no occupancy reading without a window')
+
+  const withoutCacheHit = exports.statusDockOf(t, { ...metrics, cacheHitPercent: null }, null)
+  assert.deepEqual(withoutCacheHit.children[0].map((child) => child.props.className), ['sc-dock-stat'])
+  assert.equal(exports.statusDockOf(t, null, 8000), null)
+  assert.equal(exports.statusDockOf(t, undefined, 8000), null)
+})
+
+test('snapshot polling feeds panel metrics and refreshes the context window without new entries', async () => {
+  const usage = { inputTokens: 500, outputTokens: 100, cacheReadTokens: 500, cacheWriteTokens: 0 }
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    close: { ok: true },
+    snapshot: (body) => ({
+      ok: true,
+      inheritedEventCount: 0,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      contextWindow: body.fromSeq === 0 ? 64000 : 128000,
+      entries: body.fromSeq === 0 ? [usageEntry(1, 1, 1, usage)] : [],
+      live: null
+    })
+  })
+  const { runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  assert.equal(runtime.getState('main-1').metrics, null, 'the dock stays hidden before any usage sample')
+  assert.equal(runtime.getState('main-1').contextWindow, null)
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hello')
+
+  await runtime.pollOnce('main-1')
+  let state = runtime.getState('main-1')
+  assert.deepEqual(state.metrics, {
+    uncachedInputTokens: 500,
+    outputTokens: 100,
+    cacheReadTokens: 500,
+    cacheWriteTokens: 0,
+    billedInputTokens: 1000,
+    totalTokens: 1100,
+    pressureTokens: 1000,
+    cacheHitPercent: '50',
+    contextWindow: null
+  })
+  assert.equal(state.contextWindow, 64000, 'the snapshot baseline supplies the window')
+
+  await runtime.pollOnce('main-1')
+  state = runtime.getState('main-1')
+  assert.equal(state.contextWindow, 128000, 'a snapshot without new entries still refreshes the window')
+  assert.equal(state.metrics.totalTokens, 1100, 'the existing usage samples are kept')
+  assert.equal(state.metrics.pressureTokens, 1000)
+
+  await runtime.close('main-1')
+  runtime.open('main-1')
+  const reopened = runtime.getState('main-1')
+  assert.equal(reopened.metrics, null, 'a new side session starts without dock readings')
+  assert.equal(reopened.contextWindow, null)
+})
+
+test('SSE hello and event frames feed panel metrics and the context window', async () => {
+  const fetchStub = createStreamingFetchStub({ handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.streams.length, 1)
+  const stream = fetchStub.streams[0]
+
+  stream.queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'idle',
+    running: false,
+    lastError: null,
+    contextWindow: 32000,
+    entries: [],
+    live: null
+  }))
+  await flush()
+  let state = runtime.getState('main-1')
+  assert.equal(state.contextWindow, 32000, 'hello without new entries still teaches the window')
+  assert.equal(state.metrics, null, 'hello without usage keeps the dock hidden')
+
+  stream.queue.push(sseFrame('event', {
+    entry: usageEntry(0, 1, 1, { inputTokens: 500, outputTokens: 100, cacheReadTokens: 500, cacheWriteTokens: 0 })
+  }))
+  await flush()
+  state = runtime.getState('main-1')
+  assert.equal(state.metrics.totalTokens, 1100)
+  assert.equal(state.metrics.pressureTokens, 1000)
+  assert.equal(state.metrics.cacheHitPercent, '50')
+  assert.equal(state.metrics.contextWindow, null, 'no request/context entry appeared in the fold')
+
+  stream.queue.push(sseFrame('event', {
+    entry: usageEntry(1, 1, 1, { inputTokens: 40, outputTokens: 8 })
+  }))
+  await flush()
+  state = runtime.getState('main-1')
+  assert.equal(state.metrics.totalTokens, 48, 'a re-settled step replaces its earlier sample')
+  assert.equal(state.metrics.pressureTokens, 40)
+
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+  assert.equal(scheduler.pending(), 0)
+})
+
+test('the tab body renders the dock under the composer and hides it without metrics', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const { registered } = applyBundle(exports)
+  const bodyRegistration = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const props = bodyRegistration.options.inject('session-1')
+  const state = {
+    mainId: 'main-1',
+    sessionId: 'side-1',
+    inheritedEventCount: 0,
+    nextSeq: 2,
+    entries: [],
+    nodes: [],
+    visible: true,
+    running: false,
+    status: 'idle',
+    lastError: null,
+    error: null,
+    pollError: null,
+    sending: false,
+    draft: '',
+    pending: [],
+    live: null,
+    streamMode: 'poll',
+    streaming: false,
+    timer: null,
+    onVisibility: null,
+    metrics: {
+      uncachedInputTokens: 500,
+      outputTokens: 100,
+      cacheReadTokens: 500,
+      cacheWriteTokens: 0,
+      billedInputTokens: 1000,
+      totalTokens: 1100,
+      pressureTokens: 1000,
+      cacheHitPercent: '50',
+      contextWindow: null
+    },
+    contextWindow: 64000
+  }
+  const runtime = {
+    subscribe: () => () => {},
+    getVersion: () => 0,
+    open: () => {},
+    setVisible: () => {},
+    getState: (id) => (id === 'main-1' ? state : null),
+    setDraft: () => {},
+    send: async () => {},
+    cancel: async () => {}
+  }
+  const bodyElement = bodyRegistration.component({
+    runtime,
+    sessionId: 'main-1',
+    t: props.t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  assert.equal(typeof bodyElement.type, 'function')
+  const tree = bodyElement.type(bodyElement.props)
+  assert.equal(tree.props.className, 'sc-root')
+  assert.equal(tree.children.length, 3)
+  const footer = tree.children[2]
+  assert.equal(footer.props.className, 'sc-footer')
+  assert.equal(footer.children[0].props.className, 'sc-composer', 'the composer stays first')
+  const dock = footer.children[1]
+  assert.equal(dock.props.className, 'sc-dock', 'the dock renders under the composer')
+  const dockClasses = []
+  collectElements(dock, (element) => {
+    if (element.props !== undefined && typeof element.props.className === 'string') dockClasses.push(element.props.className)
+  })
+  assert.deepEqual(dockClasses, [
+    'sc-dock',
+    'sc-dock-stat',
+    'sc-dock-sep',
+    'sc-dock-stat',
+    'sc-dock-sep',
+    'sc-dock-context',
+    'sc-dock-ring',
+    'sc-dock-ring-track',
+    'sc-dock-ring-fill'
+  ])
+  const context = findElement(dock, (element) => element.props !== undefined && element.props.className === 'sc-dock-context')
+  assert.equal(context.props['aria-label'], '上下文已用 2%')
+
+  state.metrics = null
+  const hiddenTree = bodyElement.type(bodyElement.props)
+  assert.equal(hiddenTree.children[2].children[1], null, 'no metrics means no dock')
+
+  delete state.metrics
+  delete state.contextWindow
+  const legacyTree = bodyElement.type(bodyElement.props)
+  assert.equal(legacyTree.children[2].children[1], null, 'a fabricated state without dock fields keeps working')
 })

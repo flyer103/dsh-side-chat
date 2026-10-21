@@ -12,6 +12,7 @@ import {
   LiveAttemptState,
   projectQueue,
   recentMainContext,
+  requestContextWindow,
   routeHandler,
   sideConversationBoundaryPrompt,
   sideDeveloperInstructions,
@@ -1349,4 +1350,52 @@ test('close and plugin unload end open event streams', async () => {
   assert.equal(second.req.listeners.has('close'), false)
   // Unloading twice is harmless and the sessions were already disposed.
   cleanup()
+})
+
+// --- context-window baseline for the client status dock --------------------
+
+test('requestContextWindow reads a positive finite window defensively', () => {
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: 128000 }) } }), 128000)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: 1 }) } }), 1)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: '128000' }) } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: 0 }) } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: -1 }) } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: Infinity }) } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => ({ contextWindow: Number.NaN }) } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => null } }), undefined)
+  assert.equal(requestContextWindow({ session: { requestContext: () => { throw new Error('no route context') } } }), undefined)
+  assert.equal(requestContextWindow({ session: {} }), undefined)
+  assert.equal(requestContextWindow({}), undefined)
+  assert.equal(requestContextWindow(null), undefined)
+  assert.equal(requestContextWindow(undefined), undefined)
+})
+
+test('snapshot and hello carry the side session context window only when one is available', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  const before = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(before.body.ok, true)
+  assert.equal(Object.hasOwn(before.body, 'contextWindow'), false, 'no route context yet means no field')
+
+  agent.session.requestContext = () => ({ contextWindow: 200000 })
+  const snapshot = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(snapshot.body.contextWindow, 200000, 'the snapshot payload carries the window')
+
+  const stream = await openStream(runtime, { sessionId })
+  const hello = stream.frames()[0]
+  assert.equal(hello.event, 'hello')
+  assert.equal(hello.data.contextWindow, 200000, 'the SSE hello baseline carries the window')
+  stream.close()
+
+  agent.session.requestContext = () => ({ contextWindow: 0 })
+  const invalid = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(Object.hasOwn(invalid.body, 'contextWindow'), false, 'a non-positive window is omitted')
+
+  agent.session.requestContext = () => {
+    throw new Error('context route unavailable')
+  }
+  const throwing = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(Object.hasOwn(throwing.body, 'contextWindow'), false, 'a throwing requestContext is contained')
 })

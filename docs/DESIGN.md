@@ -58,6 +58,19 @@ Delta against the existing community plugins:
    live attempt. Hiding the tab aborts the stream; showing it reconnects from the last seen
    sequence with a fresh live baseline. Live state and streams are per side session, so
    several tabs of one parent session stream independently.
+10. **Usage dock**: a slim row under the composer — the same relationship as DSH's own
+    composer dock — with total tokens, cache-hit percentage, and a context-occupancy ring
+    plus percentage. Values are folded client-side from the committed events the tab already
+    receives (assistant/message and assistant/attempt usage, the settlement's stream usage
+    chunk as fallback, replacement on a same-turn/step retry). The token and cache totals
+    count only what the side chat itself billed — its own requests, including the inherited
+    prefix its first request re-sends — and never the parent's earlier usage, whose events are
+    below the fork floor; context occupancy is absolute for the same reason, and approximate.
+    The host contributes exactly one optional, additive `contextWindow` to the existing
+    snapshot and SSE `hello` payloads so a seeded side session can show the denominator it
+    usually never appends itself. Native tooltips carry the exact bucket counts (with a
+    cache-write segment when the provider reports it) and `~used / window`; there are no
+    dialogs, turns, steps or tok/s, no new route, no extra polling, and no config option.
 
 ## P1 (designed, not implemented)
 
@@ -73,6 +86,8 @@ Delta against the existing community plugins:
 - Making the side session visible in the workspace/session list.
 - Mutating git state (branch/commit/push) on the user's behalf.
 - Replacing the native conversation UI.
+- Click-open statistics dialogs, turn/step counts and tok/s in the v1 side-chat dock;
+  matching DSH's Performance & usage detailed/compact preference.
 
 ## Adversarial notes
 
@@ -95,6 +110,25 @@ Delta against the existing community plugins:
 - **Token cost**: every side chat inherits the parent history, so its first request is
   roughly as large as the parent's next request; N concurrent side chats multiply that
   first-request cost. Stated in the README.
+- **Usage-dock fidelity**: the dock duplicates only a small, deliberate subset of DSH's
+  token/context projections. Its cache-hit share is rounded instead of using DSH's
+  distinguishing decimal precision, its context reading is the newest provider prompt size
+  without the `projectedTokens` surface-delta estimate (so it can trail the main bar by up to
+  one step), and a retried step replaces its sample rather than being folded with DSH's exact
+  semantics. The fold ignores unknown or malformed events instead of throwing, so a DSH event
+  change degrades a reading rather than the panel; fixture-based tests guard the current
+  event shapes.
+- **Snapshot page truncation**: a tab that reattaches to an existing side session receives at
+  most the trailing 2000 entries in its snapshot, so usage events older than that page are
+  missing from its dock totals. A tab that is mounted from creation sees every committed
+  event and is unaffected. This is accepted for ephemeral side chats and documented rather
+  than fixed with a second route.
+- **Additive `contextWindow`**: the one host-payload change is optional and additive.
+  An older client ignores it; a newer client against an older host (or a session with no
+  route context yet) simply omits the context reading. No new route, no polling change.
+- **Fixed dock content**: following DSH's `performanceUsage` detailed/compact choice would
+  mean reading another package's config (an internal `ctx.configForms` service) for a
+  cosmetic decision, so the dock's content is fixed and the mismatch is documented.
 - **Streaming state is presentation only**: live frames come from the process-local
   `agent/assistant-stream` feed and are never treated as durable history. A revision gap, a
   host restart, or a reconnect invalidates the live attempt; the client re-baselines from the

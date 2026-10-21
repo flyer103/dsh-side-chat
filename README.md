@@ -47,6 +47,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
 - **Isolates the transcript** — side-chat turns never appear in the main conversation, the session list, or the subagent catalog.
 - **Streams the reply** — assistant text, reasoning and tool calls render token by token from a live event stream while the turn runs; when the transport cannot stream, the tab falls back to polling.
+- **Shows its own usage** — a slim dock under the composer (the same spot as DSH's main composer dock) shows this side chat's total tokens, cache-hit percentage, and a small context-occupancy ring + percentage. Hover for the exact uncached-input, cache-read and output counts (plus a cache-write count when the provider reports one) and the approximate `~used / window` pair. The dock starts hidden until the side chat has a usage sample, and it resets with each new side session.
 - **Destroys on close** — closing a tab disposes that tab's side chat and the host tries to remove its persisted artifact; a closed side chat cannot be reopened, and the other side chats and the main session are unaffected. Collapsing the sidebar or switching tabs only pauses it.
 
 ## Compatibility
@@ -65,6 +66,8 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - The inherited context is a snapshot taken when that side chat is created; later main-session turns are not pushed into an existing side chat, and each side chat keeps its own snapshot.
 - Token streaming rides on a streamable `fetch` response. If the page transport buffers the response (detected by a missing first frame), the tab falls back to snapshot polling: the running indicator returns and the reply still appears while it grows, at poll granularity.
 - Each side chat's first request is roughly as large as the parent's next request (it carries the inherited history), so N concurrent side chats multiply that first-request cost.
+- The usage dock is approximate and side-scoped: its token totals and cache-hit percentage cover what this side chat itself billed — its own requests, including the inherited context its first request re-sends — and never the parent's earlier requests; its context percentage is absolute for the same reason, and it omits DSH's projected-token correction, so it can trail the main composer's context bar by up to one step. It shows no turns, steps or tok/s, has no click-open dialogs, and cannot follow DSH's Performance & usage detailed/compact preference; its content is fixed.
+- A reattached side-chat tab whose session log exceeds the 2000-entry snapshot page can undercount earlier usage in that dock. A tab that has watched the side chat since its first message is unaffected, because every committed event reaches it.
 
 ## Documentation
 
@@ -77,7 +80,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 | path | role |
 |---|---|
 | `lib/index.js` | host half: routes, live attempt accumulation and the SSE stream, fork seed, boundary injection, per-instance session registry, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the per-tab body (streaming messages + composer), numbered tab chips, the new-side-chat button and the close handler |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the per-tab body (streaming messages + composer + usage dock), numbered tab chips, the new-side-chat button and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` row |
 | `scripts/install.mjs` | idempotent installer/remover for a local checkout |
 | `dsh.plugin.json` | community manifest metadata; DSH does not read it (official display metadata comes from `package.json` and optional `locale/*.json`) |

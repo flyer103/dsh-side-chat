@@ -47,6 +47,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - **真实改文件**：write / edit / bash 的改动落在同一工作区，主会话能看到。
 - **隔离 transcript**：侧边会话的对话不写主会话、不进会话列表、不进 subagent 目录。
 - **流式输出**：assistant 文本、思考与工具调用在生成过程中逐 token 渲染（实时事件流）；传输不支持流式时自动回退到轮询。
+- **显示自己的用量**：composer 下方有一条细状态栏（位置对应 DSH 主输入框的底部 dock），显示这个侧边会话的总 token 数、缓存命中率，以及一个小的上下文占用圆环 + 百分比；悬停可看精确的未缓存输入 / 缓存读取 / 输出计数（提供方报告缓存写入时还会列出缓存写入）和近似的「~已用 / 窗口」值。侧边会话还没有用量样本时整行隐藏，新建侧边会话时重新计数。
 - **关闭即销毁**：关闭某个 tab 时只 dispose 该 tab 的侧边会话，host 会尝试删除它的落盘产物；已关闭的侧边会话无法再打开，其它侧边会话和主会话都不受影响。收起侧边栏或切换 tab 只是暂停。
 
 ## 兼容性
@@ -65,6 +66,8 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - 继承的上下文是创建时的快照，之后主会话的新消息不会推给已存在的侧边会话；每个侧边会话各有自己的快照。
 - 流式输出依赖可流式读取的 `fetch` 响应；如果页面传输会把响应整体缓冲（以「首帧未按时到达」判定），tab 会回退到 snapshot 轮询：运行中指示仍在，回复仍会在生成过程中按轮询粒度浮现。
 - 每个侧边会话的首条请求大小都约等于主会话的下一次请求（因为它带着继承历史），同时开 N 个就会把这份开销乘以 N。
+- 用量 dock 是近似值，且两类数字口径不同：token 总量与缓存命中率只统计这个侧边会话自己实际计费的请求——包括它首次请求重新发送的继承上下文——不包含父会话更早的请求；上下文占用出于同一原因取绝对值——继承的上下文确实在提示词里——但它不做 DSH 的 projected-token（surface delta）修正，因此可能比主会话的上下文条慢一步。dock 不显示轮次 / 步数 / tok/s，没有点开的详情弹窗，也不跟随 DSH「Performance & usage（性能与用量）」的详细 / 简洁偏好，内容固定。
+- 重新接上的侧边会话 tab 如果会话日志超过 snapshot 的 2000 条分页，dock 可能少算较早的用量；从第一条消息起就在看的 tab 不受影响，因为它逐条收到所有已提交事件。
 
 ## 文档
 
@@ -77,7 +80,7 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 | 路径 | 作用 |
 |---|---|
 | `lib/index.js` | host 半部：路由、实时尝试累积与 SSE 事件流、fork seed、boundary 注入、按实例的 session registry、close/dispose |
-| `lib/client.js` | client 半部：右侧边栏 tab 类型 + 引导页入口，按 tab 实例的正文（流式消息区 + composer）、编号 chip、新建按钮与 close handler |
+| `lib/client.js` | client 半部：右侧边栏 tab 类型 + 引导页入口，按 tab 实例的正文（流式消息区 + composer + 用量 dock）、编号 chip、新建按钮与 close handler |
 | `cordis.patch.yml` | bundle patch：插入 `dsh-side-chat` 行 |
 | `scripts/install.mjs` | 本地仓库的幂等安装/卸载脚本 |
 | `dsh.plugin.json` | 社区约定的清单元数据；DSH 不读取（官方展示元数据来自 `package.json` 与可选 `locale/*.json`） |

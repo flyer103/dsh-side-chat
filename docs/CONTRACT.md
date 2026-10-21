@@ -25,7 +25,7 @@ never share imports — only these routes.
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
 | `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement }], lastError }` \| `{ ok: false, code }` |
-| `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
+| `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
 | `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |
 
 `snapshot` and the live stream below are the client's message sources. `entries` are
@@ -38,6 +38,15 @@ sessions this plugin created (`not-found` otherwise), so they cannot read other 
 A parent session may own several side sessions (one per `instanceKey`), so `list` can return
 multiple entries with the same `sourceId`; each side session is still addressed by its own
 `sessionId`.
+
+`contextWindow` is an optional, additive field on `snapshot` and on the stream's `hello`
+frame: the side session's current route capacity as a positive number, omitted when no
+route context is known yet. A seeded side session normally inherits the parent's
+`request/context` and appends no `request/context` event of its own, so `entries` alone often
+carry no denominator; the field hands it over without a new route. An older client ignores
+it, and a client that does not receive it simply omits the context reading instead of
+guessing. A later own `request/context` entry (for example after a model switch) takes
+precedence over the baseline.
 
 Error codes: `unknown-source`, `not-found`, `empty-prompt`, `create-failed`,
 `prompt-failed`, `dispose-failed`, `internal`.
@@ -61,7 +70,7 @@ Request `{ sessionId, fromSeq? }`. On success the answer is not JSON: HTTP 200 w
 
 | frame | data | meaning |
 |---|---|---|
-| `hello` | `{ ok: true, inheritedEventCount, status, running, lastError, entries, truncated, live }` | opening baseline; same floor and `entries` rule as `snapshot` |
+| `hello` | `{ ok: true, inheritedEventCount, contextWindow?, status, running, lastError, entries, truncated, live }` | opening baseline; same floor and `entries` rule as `snapshot` |
 | `event` | `{ entry }` | one newly committed session event above the baseline, in `seq` order |
 | `live` | `{ live }` | authoritative replacement of the in-flight assistant attempt |
 | `status` | `{ status, running }` | agent lifecycle change |
@@ -163,6 +172,57 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Assistant bodies prefer the shell's `MarkdownText`; a lightweight built-in renderer is the
   fallback when that module is unavailable (it ignores `streaming`).
 
+### Usage dock (bottom row)
+
+Under the composer, inside the same footer element, the panel renders one slim metrics row
+(`.sc-dock`) in this order: total tokens, cache-hit percentage, and a context-occupancy ring
+plus percentage. It is always enabled — there is no config option — and it is hidden until
+the side session has a usage sample with non-zero tokens; the context reading appears only
+once a `contextWindow` is known, and the cache-hit reading is omitted when no prompt input
+was billed. Readings are sticky for that side session and reset when a new one is created.
+
+Readings are folded client-side from the committed `entries` the tab already receives (and
+from `event` frames), under the same fork-floor rule as the transcript:
+
+- **total tokens** — sum over accepted samples of `uncachedInputTokens + cacheReadTokens +
+  cacheWriteTokens + outputTokens`;
+- **cache-hit percentage** — `cacheReadTokens / (uncachedInputTokens + cacheReadTokens +
+  cacheWriteTokens)`, rounded to an integer; a partial hit never reads `100` (it falls back
+  to one decimal near the top), and only an exact full hit reads `100`;
+- **context occupancy** — `min(100, round(pressure / contextWindow * 100))`, where
+  `pressure` is the newest sample's `uncachedInputTokens + cacheReadTokens +
+  cacheWriteTokens`.
+
+A usage sample comes from `assistant/message.data.usage`, `assistant/attempt.data.usage`,
+or — as a fallback — the settlement's stream `usage` chunk. A sample for the same `turn` +
+`step` replaces the earlier one instead of adding to it, and `llm/retry-started` closes the
+replaceable slot for that turn + step. Malformed or unknown events are ignored, never thrown
+on. The context-window denominator is the newest `request/context` above the fork floor when
+the side session appends one; otherwise the host baseline (`contextWindow` on `snapshot` /
+`hello`) supplies it.
+
+The token and cache totals count only the side session's own requests: they sum its provider
+usage and skip events below the fork floor, so they include the inherited context the side
+chat's first request re-sends (its usage sample belongs to the side session) but never the
+parent's earlier requests, which were billed before the fork. Context occupancy is
+deliberately **absolute and approximate** for the same reason: the side session's prompt
+really carries the inherited context, and the reading is the newest provider-reported prompt
+size without DSH's projected-token surface-delta correction, so it can trail the main
+composer's meter by up to one step. These numbers ride the existing payloads — no new route
+and no polling change.
+
+All detail lives in native tooltips: the token reading's `title` carries the exact bucket
+counts (`dock.usageTitle`: uncached input, cache read and output, plus a cache-write segment
+via `dock.usageTitleWithWrite` only when the provider reported non-zero cache-write tokens;
+cache-write tokens always count toward the totals and the cache-hit denominator) and the
+context reading's `title` carries the approximate `~used / window` pair (`dock.contextTitle`);
+the context element also carries an `aria-label` with the rounded percentage
+(`dock.contextAria`). Compact counts use the `dock.thousand` / `dock.million` templates and
+exact titles use `dock.groupSeparator`. There are no click-open dialogs and no turns, steps
+or tok/s in this version. Classes keep the `sc-` prefix, the ring is an inline SVG, and the
+dock uses no portal or fixed positioning. Its content is fixed: it does not follow DSH's
+Performance & usage detailed/compact preference.
+
 ## Localization contract (client)
 
 - The panel follows the DSH locale service (`ctx.locale`); the plugin never keeps its own
@@ -176,7 +236,14 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   projection), tab chip title (plain, or `tab.titleIndexed` for later side chats of the same
   parent), the status-bar new-side-chat button (`tab.new`), status bar, empty state, composer
   placeholder, send/stop labels, thinking indicator, reasoning/tool fold titles,
-  pending-message state, context and steering tags, and error text keyed by host error code.
+  pending-message state, context and steering tags, the usage dock, and error text keyed by
+  host error code.
+- Dock keys, in the same namespace: `dock.tokens` (compact total), `dock.cacheHit`
+  (percentage), `dock.contextAria` (accessible percentage), `dock.contextTitle` (approximate
+  `~used / window`), `dock.usageTitle` (exact bucket counts), `dock.usageTitleWithWrite`
+  (exact bucket counts including cache-write tokens, used when the provider reported them),
+  and the token-formatting keys `dock.thousand`, `dock.million` and `dock.groupSeparator`.
+  The dock content is fixed; it does not follow DSH's own statistics preference.
 - Not localized (deliberately): host error `message` detail, route paths, tool names, event
   types, package and slot ids. Host messages are rendered as a monospace technical detail on
   a second line under the localized error sentence.

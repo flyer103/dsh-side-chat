@@ -227,7 +227,8 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - The tab body has a status bar (status dot plus the localized status — Not created yet /
   Running… / Sending… / Idle, or 尚未创建 / 运行中 / 发送中 / 空闲 — and the localized queue
   count while messages queue, plus the **New side chat** / 「新建侧边会话」 button that
-  opens another side-chat tab in the same pane), the message list, and the composer.
+  opens another side-chat tab in the same pane), the message list, the composer, and — once
+  the side chat has usage data — the usage dock under the composer.
 - Messages: user bubbles with timestamps; assistant Markdown streamed token by token while
   the turn runs (reasoning folded, tool calls folded with their arguments and results);
   running/thinking indicator when no live text is visible yet; optimistic pending messages;
@@ -272,7 +273,48 @@ bridged page) — that tab permanently falls back to `/side-chat/api/snapshot` p
 roughly every 0.4 s while the side agent runs and every 1.5 s when idle. The snapshot also
 carries the in-flight attempt, so fallback tabs still see text grow, at poll granularity;
 the running indicator and the optimistic pending bubble cover the rest. A tab never runs
-both paths at once, and a stream that drops after its baseline reconnects with backoff.
+both paths at once, and a stream that drops after its baseline reconnects with backoff. The
+same committed entries also feed the bottom usage dock; there is no separate statistics
+request, route or timer.
+
+### Usage dock
+
+Under the composer card the panel shows a slim metrics row with this side chat's total
+tokens, cache-hit percentage, and a small context-occupancy ring with its percentage — the
+same relationship to the composer as DSH's own composer dock. It appears once the side chat
+has its first usage sample; before that (and before any side session exists) the row is
+absent, and the context ring appears only after a context window is known. The row resets
+when a new side session is created and stays fixed for the life of the current one.
+
+Hovering the readings exposes the exact numbers: the token tooltip lists the exact bucket
+counts behind the total (uncached input, cache read and output, plus a cache-write segment
+when the provider reports cache-write tokens), and the context tooltip shows the approximate
+`~used / window` pair. Totals and the cache-hit denominator always include cache-write
+tokens. There are no click-open dialogs; turns, steps and tokens per second are not shown in
+this version.
+
+The counters are side-scoped: they are folded from the committed events the tab already
+receives above the fork floor — this side chat's own requests, including the inherited
+context its first request re-sends — so they never include the parent's earlier requests, and
+they update as each step settles. `assistant/message` and `assistant/attempt` settlements
+supply the usage, with the settlement's stream usage chunk as fallback; a retried step
+replaces its earlier sample instead of double-counting (`llm/retry-started` closes the slot).
+The cache-hit percentage is the cache-read share of billed input tokens (uncached input +
+cache read + cache write).
+
+Context occupancy is deliberately different: it is absolute and approximate. The side chat's
+prompt really carries the inherited context, so the percentage is the provider-reported
+prompt size of the newest sample — including that inherited part — divided by the route's
+context window. The host supplies that denominator on the snapshot and stream `hello`
+payloads (as an optional field) because a seeded side session usually never appends its own
+`request/context` event; if the side chat later appends one (for example after a model
+switch), that window takes precedence. The number deliberately omits DSH's projected-token
+correction for content added since the sample, so it can trail the main composer's meter by
+up to one step. Treat it as an early-warning signal, not an exact reading.
+
+The dock follows the DSH language setting like the rest of the panel. Its content is fixed:
+it does not follow the Performance & usage detailed/compact preference, and there is no
+setting to hide it.
 
 ## Localization
 
@@ -281,8 +323,9 @@ The tab's user-facing copy follows DSH's language setting (Settings → General 
 English renders English, without a restart. Switching the language re-renders already-open
 tabs immediately — the tab chips (including the numbered titles of later side chats), the
 sidebar's guide card, the status bar and its new-side-chat button, empty states, composer
-placeholders, fold and tool labels, and error titles all follow. The tab title and guide
-entries are thunks re-read by the sidebar projection, so they switch in place.
+placeholders, fold and tool labels, the usage dock's labels and tooltips, and error titles
+all follow. The tab title and guide entries are thunks re-read by the sidebar projection, so
+they switch in place.
 
 Other active languages (for example one added by an external language pack) fall back
 through DSH's locale chain to English, so the tab never shows a raw key or blank copy.
@@ -299,7 +342,11 @@ roughly as large as the parent's next request. Each side chat then grows on its 
 in the main session after creation are not added to it — and its snapshot is taken when
 that tab creates it, so side chats opened at different times carry different history.
 Treat each side chat's first message as "one extra parent-sized request": with N concurrent
-side chats, that inherited-context cost is multiplied by N.
+side chats, that inherited-context cost is multiplied by N. The dock under each tab's
+composer totals that side chat's own spend as it goes: the inherited prompt its first request
+re-sends is part of that total, while the parent's earlier requests are never folded in. Use
+its context percentage to watch how full the window is getting, and the main session's own
+statistics for the whole-log view.
 
 ## Approval behavior
 
@@ -459,14 +506,28 @@ is about a dependency, not this plugin.
   creates it.
 - **P1 items are designed but not implemented:** model picker for the side session,
   side-session history across a GUI restart, approval rendering in the tab.
+- **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
+  side chat's own requests — including the inherited context its first request re-sends — and
+  never the parent's earlier requests; context occupancy is the newest provider-reported
+  prompt size without DSH's projected-token correction, so it can trail the main composer's
+  meter by up to one step. The dock shows no turns, steps or tok/s and has no click-open
+  dialogs.
+- **A reattached tab can undercount earlier usage.** A tab that reattaches to an existing
+  side session reloads at most the trailing 2000 entries of the session log, so usage events
+  older than that snapshot page are not folded and the dock's totals are low. A tab that has
+  watched the side chat since creation is unaffected, because it receives every committed
+  event.
+- **The dock does not follow Performance & usage.** DSH can render its own composer
+  statistics in detailed or compact mode; the side-chat dock has fixed content and ignores
+  that preference.
 - The tab is Web-only, and the plugin is not a replacement for the native conversation UI.
 
 ## File map
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, RPC calls), numbered chips + the new-side-chat button, and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |
