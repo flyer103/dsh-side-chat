@@ -17,14 +17,14 @@ dsh plugin --profile desktop add @flyer103/dsh-side-chat
 
 # GitHub：默认分支，或固定到 tag
 dsh plugin --profile desktop add github:flyer103/dsh-side-chat
-dsh plugin --profile desktop add github:flyer103/dsh-side-chat#v0.4.1
+dsh plugin --profile desktop add github:flyer103/dsh-side-chat#v0.5.0
 
 # 本地路径（记录为 link: 依赖）
 cd /path/to/dsh-side-chat
 dsh plugin --profile desktop add "$(pwd)"
 
 # 用 npm pack 打出的 tarball
-dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.4.1.tgz
+dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.5.0.tgz
 ```
 
 `--profile` 用你实际运行的那个：Desktop 应用用 `desktop`，自己起的 web 进程用 `web` 或你的 profile 名。装进 `desktop` 时建议先退出 Desktop 应用（CLI 会等 profile 写锁），装完再打开；无论如何都要重启才生效。`add` 会自动把包追加进 profile 的 `dsh.profile.bundles`，**不需要**手工编辑 profile 的 `cordis.patch.yml`；重复执行是安全的。

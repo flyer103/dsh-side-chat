@@ -17,14 +17,14 @@ dsh plugin --profile desktop add @flyer103/dsh-side-chat
 
 # GitHub, default branch or a pinned tag
 dsh plugin --profile desktop add github:flyer103/dsh-side-chat
-dsh plugin --profile desktop add github:flyer103/dsh-side-chat#v0.4.1
+dsh plugin --profile desktop add github:flyer103/dsh-side-chat#v0.5.0
 
 # local checkout (records a link: dependency)
 cd /path/to/dsh-side-chat
 dsh plugin --profile desktop add "$(pwd)"
 
 # tarball built with `npm pack`
-dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.4.1.tgz
+dsh plugin --profile desktop add /absolute/path/flyer103-dsh-side-chat-0.5.0.tgz
 ```
 
 Use the profile you actually run: `desktop` for the Desktop app, `web` for a web profile. Prefer quitting the Desktop app before installing into `desktop` (the CLI waits on the profile write lock) and reopen it afterwards; either way a restart is required. `add` also appends the bundle to the profile's `dsh.profile.bundles`; you do not edit the profile's `cordis.patch.yml` by hand. Re-running is safe.
