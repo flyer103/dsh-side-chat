@@ -106,16 +106,23 @@ Restart DSH (quit and reopen the Desktop app, or restart the `dsh web` process).
    expand the right sidebar.
 2. The sidebar's guide page lists the **「Side chat」/「侧边会话」** card. Click it; the side
    chat opens as a native tab in that column. If the sidebar already shows other tabs, use
-   the tab strip's add control to open the guide page. No agent or fork work happens yet, and
-   there is no separate side-chat button and no floating overlay.
-3. Send the first message. That send creates the side session: it forks the parent's
+   the tab strip's add control to open the guide page. No agent or fork work happens yet;
+   there is no session-header side-chat button and no floating overlay, and every click on
+   the guide card opens a new tab rather than focusing an existing one.
+3. Send the first message. That send creates that tab's side session: it forks the parent's
    context, injects the boundary message, and starts the agent.
-4. Keep talking, stop a running turn, or close the tab. Collapsing the sidebar or switching
-   to another tab only pauses the live updates and keeps the session; closing the tab
-   destroys it.
+4. Open another side chat whenever you need one: click the guide card again, or press the
+   **New side chat** (「新建侧边会话」) button in any side-chat tab's status bar. Each
+   additional tab is an independent side session, created on its first message, and its chip
+   is numbered within the parent session (**Side chat 2** / 「侧边会话 2」, …).
+5. Keep talking, stop a running turn, or close one tab. Collapsing the sidebar or switching
+   to another tab only pauses that tab's live updates and keeps its side session; closing a
+   tab destroys only that side chat, and the other side chats and the main session keep
+   running.
 
-A side chat is created lazily. Opening and closing the tab without sending a message
-produces no session, no model request, and no cost.
+A side chat is created lazily. Opening and closing a tab without sending a message produces
+no session, no model request, and no cost — opening any number of tabs costs nothing until
+each one sends.
 
 ## Inheritance semantics
 
@@ -130,6 +137,9 @@ the seed. That number is also the tab's floor: the host never re-sends events be
 the tab shows only the conversation that happens after the boundary. A parent with no
 completed turn yet produces an unseeded side session (floor `0`).
 
+Each side chat takes its own seed when its own tab creates it, so two side chats opened at
+different times can start from different parent states.
+
 ### In-flight context snapshot
 
 Everything the parent committed after that boundary — user messages, assistant text, tool
@@ -140,7 +150,9 @@ main session is doing *right now*, not just what it finished.
 The snapshot filters system noise (runtime-context blocks, `<system-reminder>` payloads,
 plugin-injected messages and other non-user sources) so the side agent sees the
 conversation rather than harness plumbing. It is capped; when the parent did a lot after
-the boundary, the most recent activity is kept and older items are marked as omitted.
+the boundary, the most recent activity is kept and older items are marked as omitted. Like
+the seed, this snapshot is per side chat: it is read when that tab's side session is
+created.
 
 ### Inherited runtime
 
@@ -169,13 +181,16 @@ permission rows. It also inherits:
 - The side agent is created with `origin: 'subagent'`, which keeps it out of the session
   list. It deliberately has no `parentSession`, so it does not appear in the subagent
   catalog either.
-- One side session exists per parent session and one tab per sidebar pane: the tab system
-  dedupes the page tab within its pane, and opening the guide card again focuses the
-  existing tab. Closing the tab ends the side session; it cannot be reopened.
+- One side session per side-chat tab. A parent session can hold several side-chat tabs in
+  the same pane; each tab owns its own side session, persisted log, live stream and
+  status/draft state. Closing a tab ends only that side session — it cannot be reopened —
+  and the other side chats and the parent session are unaffected.
 - The side session owns its own persisted log on disk. The main session's log is untouched.
-- Host handles live in memory. A page refresh or a GUI restart loses the tab state even
-  though the process may still hold the agent; treat a refresh as the end of that side chat
-  (see Known limitations).
+- Host handles live in memory. A GUI or host restart loses every side session. A page reload
+  drops the client tab state; if the rebuilt tab reuses the same per-tab identity while the
+  host process is still running, `create` is idempotent per identity and reattaches to the
+  existing side session, otherwise the next message starts a new one (see Known
+  limitations).
 - The tab does not attach to the session through the generic client `sessions` service: a
   parentless subagent-origin session is not addressable there. Its message sources are the
   host's live `/side-chat/api/events` stream and the read-only
@@ -197,18 +212,22 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   told about them by the plugin. Say what you changed, or let the main session discover it.
 - Git state is a non-goal: the plugin does not branch, commit, push, or revert on your
   behalf. Commands you ask for are ordinary tool calls in the workspace.
-- Concurrency: a side chat and its parent can act at the same time, and there is no extra
-  file lock between them. Avoid editing the same file from both at once.
+- Concurrency: a side chat and its parent — and several side chats of the same parent — can
+  act at the same time, and there is no extra file lock between them. Avoid editing the same
+  file from more than one of them at once.
 
 ## Sidebar tab behavior
 
-- The side chat is a native tab type of the right sidebar (`kind: side-chat`): the tab chip
-  reads **Side chat** (「侧边会话」 when DSH is in Chinese) and the tab body fills that
-  column. There is no floating window, no fixed width, no shadow or mask, and no page
-  overlay.
+- The side chat is a native tab type of the right sidebar (`kind: side-chat`, registered
+  with `multiple: true`), so one parent session can open several side-chat tabs in the same
+  pane; every tab body fills that column. The first side chat of a parent session is
+  labelled **Side chat** (「侧边会话」 when DSH is in Chinese); later ones append their
+  ordinal — **Side chat 2**, **Side chat 3** (「侧边会话 2」, 「侧边会话 3」). There is no
+  floating window, no fixed width, no shadow or mask, and no page overlay.
 - The tab body has a status bar (status dot plus the localized status — Not created yet /
   Running… / Sending… / Idle, or 尚未创建 / 运行中 / 发送中 / 空闲 — and the localized queue
-  count while messages queue), the message list, and the composer.
+  count while messages queue, plus the **New side chat** / 「新建侧边会话」 button that
+  opens another side-chat tab in the same pane), the message list, and the composer.
 - Messages: user bubbles with timestamps; assistant Markdown streamed token by token while
   the turn runs (reasoning folded, tool calls folded with their arguments and results);
   running/thinking indicator when no live text is visible yet; optimistic pending messages;
@@ -219,12 +238,15 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   into Send, and the message queues behind the running turn.
 - The message list follows the newest message while you stay at the bottom; scrolling up
   stops the auto-follow.
-- One side-chat tab per parent session and sidebar pane; each session keeps its own tab
-  state. The tab type sets `keepMounted`, so switching tabs, switching sessions, collapsing
-  the column or changing dock mode preserves the transcript, scroll position and draft.
-- Collapsing the sidebar or switching to another tab makes the tab invisible: live updates
-  pause and the agent and transcript are kept. Closing the tab is the destructive action
-  (see lifecycle).
+- Several side chats can run at once: the guide card opens a new tab on every click, and
+  each tab's status-bar new-side-chat button does the same. Each additional tab starts empty
+  and creates its own side session on its first message.
+- Each side-chat tab keeps its own side session, transcript, scroll position and draft. The
+  tab type sets `keepMounted`, so switching tabs, switching sessions, collapsing the column
+  or changing dock mode preserves every tab's state.
+- Collapsing the sidebar or switching to another tab makes that tab invisible: its live
+  updates pause and its agent and transcript are kept. Closing one tab is the destructive
+  action for that side chat only (see lifecycle).
 
 ### How messages reach the tab
 
@@ -236,7 +258,8 @@ currently being generated. The tab renders that attempt — reasoning, tool-call
 and Markdown text — as it arrives, so a reply types itself into the panel; when the
 attempt settles, the committed `assistant/message` replaces the live row. The host clears
 the live attempt on commit (and says so on the stream), so the streaming row and the
-committed row never both render.
+committed row never both render. When several side chats are open, each visible tab keeps
+its own connection for its own side session; they do not share one.
 
 A hidden tab aborts the stream — its right sidebar is collapsed, it is not the active tab,
 or the browser tab is hidden — and reconnects with a fresh baseline when it becomes
@@ -256,9 +279,10 @@ both paths at once, and a stream that drops after its baseline reconnects with b
 The tab's user-facing copy follows DSH's language setting (Settings → General → Language /
 语言). Chinese and English are built in: choosing 中文 renders the Chinese copy and choosing
 English renders English, without a restart. Switching the language re-renders already-open
-tabs immediately — the tab chip, the sidebar's guide card, the status bar, empty states,
-composer placeholders, fold and tool labels, and error titles all follow. The tab title and
-guide entries are thunks re-read by the sidebar projection, so they switch in place.
+tabs immediately — the tab chips (including the numbered titles of later side chats), the
+sidebar's guide card, the status bar and its new-side-chat button, empty states, composer
+placeholders, fold and tool labels, and error titles all follow. The tab title and guide
+entries are thunks re-read by the sidebar projection, so they switch in place.
 
 Other active languages (for example one added by an external language pack) fall back
 through DSH's locale chain to English, so the tab never shows a raw key or blank copy.
@@ -270,10 +294,12 @@ line, which is omitted when it would only repeat the error code.
 
 ## Token cost
 
-The side session sends the inherited history with its first request, so that request is
-roughly as large as the parent's next request. Each side chat then grows on its own —
-turns in the main session after creation are not added to it. Treat the first message as
-"one extra parent-sized request" when estimating cost.
+Each side chat sends its inherited history with its first request, so that request is
+roughly as large as the parent's next request. Each side chat then grows on its own — turns
+in the main session after creation are not added to it — and its snapshot is taken when
+that tab creates it, so side chats opened at different times carry different history.
+Treat each side chat's first message as "one extra parent-sized request": with N concurrent
+side chats, that inherited-context cost is multiplied by N.
 
 ## Approval behavior
 
@@ -289,20 +315,21 @@ interactive confirmation for side chats that need to write files or run commands
 
 | action | effect |
 |---|---|
-| open the guide card | client tab state only; no agent |
-| first send | create: fork seed, snapshot, boundary message, agent |
-| collapse sidebar / switch tab | live updates pause; tab state, draft and the side session are kept |
-| close the tab | client clears the tab state, then calls `close` if a side session exists; host removes the handle before disposing it |
-| close during a running turn | dispose cancels the turn; the handle is gone |
-| close result | the agent is disposed; the host then deletes the side session's own persisted directory from the Host process with `node:fs/promises.rm` (best effort, guarded to that directory) |
-| reopen | the destroyed side session cannot be reopened; opening the guide card again starts a new tab, and its side session is created on the next message |
+| open the guide card / press a tab's new-side-chat button | a new client tab instance only; no agent |
+| first send in that tab | create that tab's side session: fork seed, snapshot, boundary message, agent |
+| collapse sidebar / switch tab | that tab's live updates pause; its tab state, draft and side session are kept |
+| close the tab | client clears that tab's state, then calls `close` if its side session exists; host removes the handle before disposing it |
+| close during a running turn | dispose cancels that side session's turn; the handle is gone; other side chats keep running |
+| close result | that tab's agent is disposed; the host then deletes that side session's own persisted directory from the Host process with `node:fs/promises.rm` (best effort, guarded to that directory); the other side chats and the main session are unaffected |
+| reopen | the closed side session cannot be reopened; opening the guide card or the new-side-chat button starts a new tab, whose side session is created on the next message |
 
 Disposal happens whenever a side session existed; artifact deletion is best effort. If the
 persistence service cannot locate the artifact or the removal fails, close still succeeds
 and only leaves the side session's own artifact on disk as an orphan — it is never shown in
 the GUI or the session list, and the main session and workspace are never affected. Closing
-a tab that never sent a message only discards the empty client tab. A racing
-`close`/`prompt` returns `not-found` rather than double-freeing.
+a tab that never sent a message only discards the empty client tab, and closing one
+side-chat tab never disposes another tab's side session or touches the parent session. A
+racing `close`/`prompt` returns `not-found` rather than double-freeing.
 
 ## Compatibility
 
@@ -380,8 +407,17 @@ updates.
 
 **A refresh lost the side chat.**
 
-Expected in this phase: tab state and host handles are in memory and not restored across a
-reload. Reopen the guide card; a new side chat is created on the next message.
+Tab state lives in memory and is not restored across a reload. If the rebuilt tab reuses the
+same per-tab identity while the host process is still running, its `create` reattaches to
+the existing side session (create is idempotent per instance key); otherwise you get a new
+side chat. After a GUI or host restart every side session is gone. Reopen the guide card or
+press the new-side-chat button; a new side chat is created on the next message.
+
+**Clicking the guide card starts another side chat instead of focusing the old one.**
+
+That is intended: one parent session can hold several independent side chats, and the guide
+card — like the status bar's new-side-chat button — opens a new one on every activation.
+Close the tabs you no longer need; closing one only destroys its own side session.
 
 **A reply appears all at once instead of streaming.**
 
@@ -408,10 +444,10 @@ is about a dependency, not this plugin.
 ## Known limitations
 
 - **Approval prompts are not surfaced in the side-chat tab.** See above.
-- **A closed tab cannot be restored.** Closing destroys the side session; a refresh or GUI
-  restart also loses the tab state.
-- **One side-chat tab per parent session and sidebar pane.** Multiple side chats per parent
-  are P1. Reopening the guide card focuses the existing tab rather than adding a second one.
+- **A closed tab cannot be restored.** Closing destroys only that side session; a GUI or host
+  restart also loses every side session. The other side chats are unaffected.
+- **Every side chat carries its own inherited context.** Its first request is about as large
+  as the parent's next request, so N concurrent side chats multiply that cost.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
   own session log can be left on disk as an orphan when removal fails. It is never listed in
   the GUI or session list.
@@ -419,18 +455,18 @@ is about a dependency, not this plugin.
   stream normally; if a transport buffers the response (detected by a missing opening frame
   after ~2.5 s), the tab falls back to polling committed events, so replies then appear at
   poll granularity or on commit.
-- **History is not refreshed.** The snapshot is taken once, at creation.
-- **P1 items are designed but not implemented:** model picker for the side session, multiple
-  concurrent side chats per parent, side-session history across a GUI restart, approval
-  rendering in the tab.
+- **History is not refreshed.** The snapshot is taken once per side chat, when that tab
+  creates it.
+- **P1 items are designed but not implemented:** model picker for the side session,
+  side-session history across a GUI restart, approval rendering in the tab.
 - The tab is Web-only, and the plugin is not a replacement for the native conversation UI.
 
 ## File map
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-source session registry, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, the tab body (SSE/poll message sources, streaming rendering, composer, RPC calls) and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, RPC calls), numbered chips + the new-side-chat button, and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |

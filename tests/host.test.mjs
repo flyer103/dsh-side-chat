@@ -630,6 +630,94 @@ test('list reports live side sessions', async () => {
   assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [{ sessionId, sourceId: 'main-1' }] })
 })
 
+test('distinct instance keys create one side session per tab instance', async () => {
+  const parent = makeParent({ events: BASE_EVENTS })
+  const runtime = makeRuntime({ parents: [parent] })
+  apply(runtime.ctx)
+
+  const first = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  const second = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-b' })
+  assert.equal(first.body.ok, true)
+  assert.equal(second.body.ok, true)
+  assert.notEqual(first.body.sessionId, second.body.sessionId)
+  assert.equal(first.body.inheritedEventCount, 4)
+  assert.equal(second.body.inheritedEventCount, 4)
+  assert.equal(runtime.created.length, 2)
+  for (const options of runtime.created) {
+    assert.equal(options.seed.length, 4)
+    assert.equal(options.seed.at(-1).type, 'turn/end')
+    assert.equal(options.inheritedEventCount, 4)
+  }
+})
+
+test('create is idempotent for the same instance key', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+
+  const first = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  const second = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(first.body.ok, true)
+  assert.equal(second.body.ok, true)
+  assert.equal(second.body.sessionId, first.body.sessionId)
+  assert.equal(second.body.inheritedEventCount, 4)
+  assert.equal(runtime.created.length, 1)
+})
+
+test('concurrent creates with the same instance key dedupe to one side session', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })], createDelayMs: 10 })
+  apply(runtime.ctx)
+
+  const [first, second] = await Promise.all([
+    post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' }),
+    post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' }),
+  ])
+  assert.equal(first.body.ok, true)
+  assert.equal(second.body.ok, true)
+  assert.equal(first.body.sessionId, second.body.sessionId)
+  assert.equal(runtime.created.length, 1)
+})
+
+test('closing one instance leaves the other alive and allows the key a new session', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+
+  const first = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  const second = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-b' })
+  assert.deepEqual((await post(runtime, 'close', { sessionId: first.body.sessionId })).body, { ok: true })
+  assert.deepEqual((await post(runtime, 'list', {})).body, {
+    ok: true,
+    sessions: [{ sessionId: second.body.sessionId, sourceId: 'main-1' }],
+  })
+  assert.equal(runtime.disposed.includes(first.body.sessionId), true)
+  assert.equal(runtime.disposed.includes(second.body.sessionId), false)
+
+  const recreated = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(recreated.body.ok, true)
+  assert.notEqual(recreated.body.sessionId, first.body.sessionId)
+  assert.notEqual(recreated.body.sessionId, second.body.sessionId)
+  assert.equal(runtime.created.length, 3)
+  const listed = (await post(runtime, 'list', {})).body.sessions
+  assert.deepEqual(
+    listed.map((entry) => entry.sessionId).sort(),
+    [second.body.sessionId, recreated.body.sessionId].sort(),
+  )
+})
+
+test('list reports both instances of a parent with their source id', async () => {
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+
+  const first = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  const second = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-b' })
+  assert.deepEqual((await post(runtime, 'list', {})).body, {
+    ok: true,
+    sessions: [
+      { sessionId: first.body.sessionId, sourceId: 'main-1' },
+      { sessionId: second.body.sessionId, sourceId: 'main-1' },
+    ],
+  })
+})
+
 test('artifactDirectory only accepts the session\'s own absolute directory', () => {
   assert.equal(
     artifactDirectory({ id: 'side-chat-x' }, { path: '/sessions/project/side-chat-x/session.v4.jsonl' }),

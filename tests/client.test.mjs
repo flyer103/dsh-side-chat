@@ -566,7 +566,7 @@ test('apply registers the sidebar tab type, the localized body slot and the clos
   assert.equal(type.priority, 'extension')
   assert.equal(type.keepMounted, true)
   assert.equal(type.title(), '侧边会话')
-  assert.equal(type.multiple, undefined)
+  assert.equal(type.multiple, true)
   assert.equal(type.guide.length, 1)
   assert.equal(type.guide[0].id, 'side-chat')
   assert.equal(type.guide[0].order, 10)
@@ -1661,4 +1661,147 @@ test('pollOnce stays a deterministic snapshot pull and applies the live field', 
   assert.deepEqual(exports.liveBlocksOf(state), [{ kind: 'text', text: 'tok' }])
   assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
   await runtime.close('main-1')
+})
+
+test('instanceKeyOf keys one runtime record per tab occurrence of a parent session', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.instanceKeyOf('session-1', 'tab-a'), 'session-1#tab-a')
+  assert.equal(exports.instanceKeyOf('session-1', 'tab-b'), 'session-1#tab-b')
+  assert.equal(exports.instanceKeyOf('session-1', undefined), 'session-1')
+  assert.equal(exports.instanceKeyOf('session-1', ''), 'session-1')
+  assert.equal(exports.instanceKeyOf('', 'tab-a'), '')
+})
+
+test('one parent session drives one independent side conversation per side-chat tab', async () => {
+  const { exports } = loadBundle()
+  const fetchStub = createFetchStub({
+    create: (body) => ({ ok: true, sessionId: `side-${String(body.instanceKey).slice(-1)}`, inheritedEventCount: 2 }),
+    prompt: { ok: true },
+    close: { ok: true },
+    snapshot: { ok: true, inheritedEventCount: 2, running: false, status: 'idle', lastError: null, entries: [] }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  const first = exports.instanceKeyOf('main-1', 'tab-a')
+  const second = exports.instanceKeyOf('main-1', 'tab-b')
+  runtime.open(first, 'main-1')
+  runtime.open(second, 'main-1')
+
+  assert.equal(runtime.getState(first).sourceId, 'main-1')
+  assert.equal(runtime.getState(second).sourceId, 'main-1')
+  assert.equal(runtime.labelOf(first), 1)
+  assert.equal(runtime.labelOf(second), 2)
+
+  runtime.setVisible(first, true)
+  runtime.setVisible(second, true)
+  await runtime.send(first, 'hello first')
+  await runtime.send(second, 'hello second')
+
+  assert.deepEqual(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}create`).map((call) => call.body), [
+    { sourceId: 'main-1', instanceKey: first },
+    { sourceId: 'main-1', instanceKey: second }
+  ])
+  assert.equal(runtime.getState(first).sessionId, 'side-a')
+  assert.equal(runtime.getState(second).sessionId, 'side-b')
+  assert.equal(runtime.getState(first).sending, false)
+  assert.equal(runtime.getState(second).sending, false)
+  assert.ok(scheduler.pending() >= 1)
+
+  await runtime.close(first)
+  assert.equal(runtime.getState(first), null)
+  assert.equal(runtime.getState(second).sessionId, 'side-b', 'closing one tab keeps the other side chat')
+  assert.equal(runtime.labelOf(second), 2, 'the surviving chip keeps its ordinal')
+  assert.deepEqual(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}close`).map((call) => call.body), [
+    { sessionId: 'side-a' }
+  ])
+
+  await runtime.close(second)
+  assert.equal(runtime.labelOf(first), 0)
+  runtime.open(exports.instanceKeyOf('main-1', 'tab-c'), 'main-1')
+  assert.equal(runtime.labelOf('main-1#tab-c'), 1, 'a fresh first side chat starts at the plain title again')
+  assert.equal(scheduler.pending(), 0)
+})
+
+test('later side-chat tabs of one session get a numbered chip title', () => {
+  const { exports } = loadBundle()
+  const { registered, locale } = applyBundle(exports)
+  const bodyProps = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1')
+  const title = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title').component
+  const runtime = exports.createRuntime({
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true }) }),
+    document: null,
+    stream: false
+  })
+  const titleFor = (tabId) => title({
+    runtime,
+    sessionId: 'session-1',
+    t: bodyProps.t,
+    useTabInfo: () => ({ tab: { id: tabId, visible: true } })
+  })
+  runtime.open(exports.instanceKeyOf('session-1', 'tab-1'), 'session-1')
+  runtime.open(exports.instanceKeyOf('session-1', 'tab-2'), 'session-1')
+  assert.deepEqual(titleFor('tab-1').children, ['侧边会话'])
+  assert.deepEqual(titleFor('tab-2').children, ['侧边会话 2'])
+  locale.setLocale('en')
+  assert.deepEqual(titleFor('tab-1').children, ['Side chat'])
+  assert.deepEqual(titleFor('tab-2').children, ['Side chat 2'])
+})
+
+test('the tab status bar offers a new side chat through the tab actions', () => {
+  const { exports } = loadBundle()
+  const { registered } = applyBundle(exports)
+  const bodyRegistration = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const props = bodyRegistration.options.inject('session-1')
+  const opened = []
+  const tab = {
+    id: 'tab-1',
+    visible: true,
+    actions: { openTab: (kind, options) => opened.push({ kind, options }) }
+  }
+  props.runtime.open(exports.instanceKeyOf('session-1', 'tab-1'), 'session-1')
+  const bodyElement = bodyRegistration.component({ ...props, useTabInfo: () => ({ tab }) })
+  assert.equal(typeof bodyElement.type, 'function', 'the tab body renders the panel component')
+  const tree = bodyElement.type(bodyElement.props)
+  const button = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-new')
+  assert.ok(button !== undefined, 'the new-side-chat control renders in the status bar')
+  assert.equal(button.props['aria-label'], '新建侧边会话')
+  button.props.onClick()
+  assert.deepEqual(opened, [{ kind: KIND, options: undefined }])
+})
+
+test('the close handler destroys only the side conversation of the closed tab occurrence', async () => {
+  const { exports } = loadBundle()
+  const { ctx, registered, closeHandlers } = createCtxStub()
+  const { doc } = createDocumentStub()
+  const { fetchImpl, calls } = createFetchStub({
+    create: (body) => ({ ok: true, sessionId: `side-${String(body.instanceKey).slice(-1)}`, inheritedEventCount: 0 }),
+    prompt: { ok: true },
+    close: { ok: true }
+  })
+  const previousDocument = globalThis.document
+  const previousFetch = globalThis.fetch
+  globalThis.document = doc
+  globalThis.fetch = fetchImpl
+  try {
+    exports.apply(ctx)
+    const runtime = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').options.inject('session-1').runtime
+    const first = exports.instanceKeyOf('session-1', 'tab-a')
+    const second = exports.instanceKeyOf('session-1', 'tab-b')
+    runtime.open(first, 'session-1')
+    runtime.open(second, 'session-1')
+    await runtime.send(first, 'hello first')
+    await runtime.send(second, 'hello second')
+    assert.equal(runtime.getState(first).sessionId, 'side-a')
+    assert.equal(runtime.getState(second).sessionId, 'side-b')
+
+    closeHandlers[0].handler('session-1', { id: 'tab-b', kind: KIND })
+    await flush()
+    assert.equal(runtime.getState(second), null)
+    assert.equal(runtime.getState(first).sessionId, 'side-a', 'the other side chat stays alive')
+    assert.deepEqual(calls.filter((call) => call.url === `${API_PREFIX}close`).map((call) => call.body), [
+      { sessionId: 'side-b' }
+    ])
+  } finally {
+    globalThis.document = previousDocument
+    globalThis.fetch = previousFetch
+  }
 })

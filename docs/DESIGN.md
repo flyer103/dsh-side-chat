@@ -2,8 +2,8 @@
 
 ## Positioning
 
-A DeepSeek Harness (DSH) profile plugin that gives the Web GUI a **side chat** for the
-current session: an ephemeral, context-inheriting conversation that can **really modify
+A DeepSeek Harness (DSH) profile plugin that gives the Web GUI **side chats** for the
+current session: ephemeral, context-inheriting conversations that can **really modify
 files** while the main thread keeps running, without writing anything into the main
 session transcript.
 
@@ -18,9 +18,11 @@ Delta against the existing community plugins:
 
 ## P0 (this phase)
 
-1. **Entry**: the plugin registers a native tab type of the right Sidebar (`kind: side-chat`)
-   plus a guide entry, so it is reached through the session header's "Open sidebar" control
-   rather than a standalone button. Opening the tab performs no agent/fork work.
+1. **Entry**: the plugin registers a native tab type of the right Sidebar (`kind: side-chat`,
+   `multiple: true`) plus a guide entry, so it is reached through the session header's "Open
+   sidebar" control rather than a standalone button. Each activation of the guide entry, and
+   each press of the tab status bar's new-side-chat button, opens another tab instance.
+   Opening a tab performs no agent/fork work.
 2. **Lazy creation**: the side session is created on the first submitted message.
 3. **Context inheritance**: seed = the parent's event prefix through its last completed
    turn (`turn/end`); plus a live-log snapshot of everything committed after that boundary
@@ -31,29 +33,35 @@ Delta against the existing community plugins:
 5. **Real mutations**: the boundary + developer instructions explicitly allow
    `write`/`edit`/`bash`-driven changes in the same working directory. Mutations are real;
    they are never mirrored into the main session.
-6. **Isolation**: `origin: 'subagent'` keeps the side session out of the session list; no
-   `parentSession` (avoids the subagent catalog); one side session per parent session.
-7. **Lifecycle**: closing the panel disposes the agent and then best-effort deletes its
-   persisted artifact (a failed removal is logged; the close still succeeds and the orphan
-   never appears in any list). A side chat cannot be reopened.
-8. **UI**: the side chat lives in a right-Sidebar tab (body fills the column): user bubbles +
-   assistant markdown, reasoning fold, tool chips with results, **token-streamed assistant
-   output**, running/thinking state, optimistic pending messages, Stop, auto-follow scrolling,
-   `Enter` send / `Shift+Enter` newline. Collapsing the column or switching tabs pauses the
-   live updates and keeps the session; closing the tab destroys it.
-9. **Streaming**: the host folds `agent/assistant-stream` frames into a per-session live
+6. **Isolation**: `origin: 'subagent'` keeps the side sessions out of the session list; no
+   `parentSession` (avoids the subagent catalog). One side session per tab instance: a
+   parent session may hold several side chats concurrently, and none of them is visible in
+   the session list or the subagent catalog.
+7. **Lifecycle**: closing one side-chat tab disposes that tab's side session and then
+   best-effort deletes its persisted artifact (a failed removal is logged; the close still
+   succeeds and the orphan never appears in any list). Other side chats and the main session
+   are untouched; a closed side chat cannot be reopened.
+8. **UI**: each side chat lives in its own right-Sidebar tab instance (body fills the
+   column): user bubbles + assistant markdown, reasoning fold, tool chips with results,
+   **token-streamed assistant output**, running/thinking state, optimistic pending messages,
+   Stop, auto-follow scrolling, `Enter` send / `Shift+Enter` newline. Tab chips are numbered
+   per parent session (plain title for the first, `Side chat 2` / 「侧边会话 2」… for later
+   ones), and the status bar has a new-side-chat button. Collapsing the column or switching
+   tabs pauses the live updates and keeps the sessions; closing a tab destroys only that
+   tab's side session.
+9. **Streaming**: the host folds `agent/assistant-stream` frames into a per-side-session live
    attempt and pushes it (plus committed events, status and errors) over
    `POST /side-chat/api/events` (SSE). The tab renders the active attempt as a normal
    assistant row while it streams and swaps in the committed message when it settles. When a
    stream cannot be established — no readable body, JSON refusal, or a transport that buffers
    the response — the tab degrades to the existing `snapshot` polling, which also carries the
    live attempt. Hiding the tab aborts the stream; showing it reconnects from the last seen
-   sequence with a fresh live baseline.
+   sequence with a fresh live baseline. Live state and streams are per side session, so
+   several tabs of one parent session stream independently.
 
 ## P1 (designed, not implemented)
 
 - Model picker for the side session.
-- Multiple concurrent side chats per session (tab strip).
 - Surfacing the side session's **approval prompts** in the panel (today the side session
   inherits the parent's approval policy; if that policy asks the human, the request has no
   answerer inside the panel).
@@ -70,18 +78,23 @@ Delta against the existing community plugins:
 
 - **Crash mid-creation**: `agents.create` rejects; the client shows the error and keeps the
   panel empty. No half-registered handle is stored before `create` resolves.
-- **Double send / double create**: `create` is idempotent per `sourceId`; the client also
-  guards with a single in-flight send.
-- **Close during a running turn**: `close` disposes the handle; the dispose path cancels the
-  turn. The client stops polling status for that id.
+- **Double send / double create**: `create` is idempotent per identity (the per-tab
+  `instanceKey`, or `source:<sourceId>` when no key is sent) and concurrent creates share
+  one in-flight result; the client also guards with a single in-flight send per tab. A
+  reissued identity (a retry, or a reload that keeps the tab identity) reattaches to the
+  still-running side session instead of creating a second one.
+- **Close during a running turn**: `close` disposes only that side session's handle; the
+  dispose path cancels its turn. Other side chats keep running, and the client stops
+  polling status for that id.
 - **Parent unloaded while the panel is open**: `prompt`/`status` return `not-found`; the panel
   shows the error instead of silently queueing.
 - **Artifact deletion**: path comes from `sessionPersistence.locate(header)`; deletion runs
   with `node:fs/promises.rm` after a short drain delay, guarded to this plugin's own session
   directory (absolute path, `basename(dir) === session id`). A failed removal is logged and the
   close still disposes and succeeds; the orphan never appears in any list.
-- **Token cost**: the side session inherits the parent history, so its first request is
-  roughly as large as the parent's next request. Stated in the README.
+- **Token cost**: every side chat inherits the parent history, so its first request is
+  roughly as large as the parent's next request; N concurrent side chats multiply that
+  first-request cost. Stated in the README.
 - **Streaming state is presentation only**: live frames come from the process-local
   `agent/assistant-stream` feed and are never treated as durable history. A revision gap, a
   host restart, or a reconnect invalidates the live attempt; the client re-baselines from the
@@ -97,10 +110,11 @@ Delta against the existing community plugins:
   falls back to polling; a stream that drops after its baseline reconnects with backoff, and
   two failed connects without a baseline degrade the tab to polling. A tab never runs both
   paths at once.
-- **Concurrent stream connections**: one stream per parent session may be open from more than
-  one tab; the host fans the same frames out to every connection and cleans each one up on
+- **Concurrent stream connections**: each tab opens one stream for its own side session; the
+  host fans a side session's frames out to every connection on it and cleans each one up on
   request close, session close, or plugin unload. Live state is kept per side session even
-  when no stream is connected, so the snapshot fallback sees it too.
+  when no stream is connected, so the snapshot fallback sees it too, and several side chats
+  stream independently.
 
 ## Rollback
 
