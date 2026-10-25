@@ -316,6 +316,34 @@ The dock follows the DSH language setting like the rest of the panel. Its conten
 it does not follow the Performance & usage detailed/compact preference, and there is no
 setting to hide it.
 
+## File references (`@`)
+
+The composer completes workspace paths the same way the main composer does. The pick inserts
+a plain `@path` mention into the prompt; DSH's own file-reference guidance (installed on every
+agent that can call `read`) tells the model to read the referenced file, so the pick itself
+reads nothing and sends no content.
+
+- Type `@` at the start of the message or after a space to open the path menu for this side
+  chat's working directory (inherited from the parent). Keep typing to narrow it. `@"` starts
+  a quoted path for names with spaces; picking a directory inserts its trailing slash and
+  keeps the menu open inside that directory.
+- Keyboard: Up/Down move through the rows (wrapping), Enter or Tab inserts the highlighted
+  path, Escape closes, and moving focus out of the composer closes it. Mouse picking works
+  too and keeps textarea focus. While the menu has a candidate, Enter picks instead of
+  sending; when there is nothing to pick (still loading or no match), Enter closes the menu
+  and sends the draft. With the provider unavailable the menu never opens and Enter simply
+  sends.
+- The inserted spelling matches the main composer: `@path`, `@"path with spaces"`, `@dir/`,
+  or an open `@"dir/` while descending into a quoted directory. Committed user bubbles show
+  such references as chips.
+- Before the first message the tab has no side session yet, so the menu lists the parent
+  session's working directory; once the side session exists it uses the side session's own
+  agent. Either way discovery is bounded by the same workspace and returns names only.
+- A profile without a file-reference provider (the shipped web stack has one) shows no menu;
+  typing `@...` still sends the text unchanged.
+- Only files and folders are completed in this version. `@session` references, `/` commands
+  and skills, attachments, and drag-and-drop are not part of the side-chat composer yet.
+
 ## Localization
 
 The tab's user-facing copy follows DSH's language setting (Settings → General → Language /
@@ -355,7 +383,7 @@ the `danger-full-access` preset) tools run without prompts.
 
 With a policy that asks the human, the approval prompt is **not rendered inside the
 side-chat tab**, and the side agent waits for an answer that the tab cannot give. Until
-approval surfacing ships (P1), use a profile/preset whose policy does not require
+approval surfacing ships (P1b), use a profile/preset whose policy does not require
 interactive confirmation for side chats that need to write files or run commands.
 
 ## Lifecycle and destruction
@@ -382,9 +410,11 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
 
 - Verified target: DSH `0.2.1-rc.2`, Desktop profile, Web GUI. This release was verified
   against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the
-  plugin launches, all eight host routes answer (including the SSE route's JSON fallback),
-  and the client bundle is served. The stream frame contract is covered by the host/client
-  unit tests and an in-process end-to-end check over a real HTTP server.
+  plugin launches, the pre-existing host routes answer (including the SSE route's JSON
+  fallback), and the client bundle is served. The stream frame contract is covered by the
+  host/client unit tests and an in-process end-to-end check over a real HTTP server. The
+  `@file` route added since that run is covered by host-route unit tests rather than a
+  real-process check.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -504,7 +534,14 @@ is about a dependency, not this plugin.
   poll granularity or on commit.
 - **History is not refreshed.** The snapshot is taken once per side chat, when that tab
   creates it.
-- **P1 items are designed but not implemented:** model picker for the side session,
+- **`@` completion needs the host file-reference provider.** Profiles that mount one (the
+  shipped web stack does) complete workspace paths; without it the menu stays hidden and
+  `@` text is sent unchanged. An `unavailable` answer is remembered for that tab, so a
+  transient provider failure hides the menu until the tab is reopened.
+- **Only file and folder references are completed.** `@session` references, `/` commands and
+  skills, attachments, and drag-and-drop are not implemented in the side-chat composer; they
+  belong to later phases.
+- **P1b items are designed but not implemented:** model picker for the side session,
   side-session history across a GUI restart, approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
   side chat's own requests — including the inherited context its first request re-sends — and
@@ -526,8 +563,8 @@ is about a dependency, not this plugin.
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes including the SSE stream, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream and the read-only `references` lookup, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, `@` file-reference completion and chips, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |

@@ -27,6 +27,7 @@ never share imports — only these routes.
 | `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement }], lastError }` \| `{ ok: false, code }` |
 | `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
 | `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |
+| `/side-chat/api/references` | `{ sourceId?, sessionId?, query }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' }] }` \| `{ ok: false, code, message? }` |
 
 `snapshot` and the live stream below are the client's message sources. `entries` are
 committed session events whose `seq >= max(inheritedEventCount, fromSeq ?? inheritedEventCount)`,
@@ -39,6 +40,18 @@ A parent session may own several side sessions (one per `instanceKey`), so `list
 multiple entries with the same `sourceId`; each side session is still addressed by its own
 `sessionId`.
 
+`references` is the composer's `@file` lookup: one of `sessionId` / `sourceId` must resolve,
+and `sessionId` wins. A `sessionId` must name a side session this plugin created
+(`not-found` otherwise); `sourceId` must name a live parent agent (`unknown-source`
+otherwise) and covers the window before the first message creates the side session. The
+addressed agent's working directory bounds discovery, `query` is the text after `@` passed
+through unchanged (string, at most 512 characters, `bad-request` otherwise), and only path
+candidates are returned — no file content, no reading or attaching. The provider
+(`ctx.fileReferences`) is optional: absent or failing answers `unavailable`, and the client
+then hides the menu for that tab. The route keeps no cache and no durable state; a client
+disconnect aborts the provider lookup (which is why it reads its own request body rather
+than going through the shared JSON handler) and gets no response.
+
 `contextWindow` is an optional, additive field on `snapshot` and on the stream's `hello`
 frame: the side session's current route capacity as a positive number, omitted when no
 route context is known yet. A seeded side session normally inherits the parent's
@@ -49,7 +62,7 @@ guessing. A later own `request/context` entry (for example after a model switch)
 precedence over the baseline.
 
 Error codes: `unknown-source`, `not-found`, `empty-prompt`, `create-failed`,
-`prompt-failed`, `dispose-failed`, `internal`.
+`prompt-failed`, `dispose-failed`, `bad-request`, `unavailable`, `internal`.
 
 `create` is idempotent per identity: the opaque `instanceKey` when a non-empty one is sent,
 otherwise the legacy identity `source:<sourceId>`. A repeated call for the same identity
@@ -105,6 +118,12 @@ side session, so several tabs of the same parent session hold independent connec
 auth headers: same-origin only. When the body is not readable, or no `hello` arrives within
 ~2.5 s (a buffering transport), the client degrades that tab to `snapshot` polling and does
 not mix the two paths.
+
+The `references` lookup is an ordinary JSON POST with one extra rule: the tab debounces it
+(120 ms) and aborts the previous request when a newer token supersedes it, so at most one
+lookup per tab is in flight. The host observes the disconnect and cancels the provider scan;
+an aborted answer is never rendered. `sessionId` is sent only once the tab's side session
+exists; before that the request carries `sourceId`.
 
 ## Client integration (right Sidebar tab, no standalone button)
 
@@ -168,9 +187,33 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   visible live blocks.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
-  `entries`.
+  `entries`. Enter never submits while an input-method composition is in progress.
 - Assistant bodies prefer the shell's `MarkdownText`; a lightweight built-in renderer is the
   fallback when that module is unavailable (it ignores `streaming`).
+
+### Reference completion (`@file`)
+
+- The bundle cannot import `@deepseek-ai/dsh-file-reference`; it replicates the browser-safe
+  `activeAtToken` / `formatFileMention` grammar locally, with the same prompt spellings:
+  `@path`, `@"path with spaces"`, `@dir/`, and `@"dir/` (open quote) while descending.
+- Typing `@` at input start or after whitespace opens a menu at the top of the composer card
+  (above the textarea), filled from
+  `POST /side-chat/api/references` (120 ms debounce, one in-flight request per tab, previous
+  request aborted, stale answers dropped). No query is sent while composing, and no menu
+  opens when the provider reported `unavailable` (cached for that tab).
+- The menu is a listbox inside the composer card (no portal): `role="listbox"` with rows
+  `role="option"` (kind glyph, basename — directories keep the trailing slash — and, when the
+  path has one, its parent directory to tell same-named entries apart), the textarea is a
+  `combobox` with `aria-expanded`, `aria-controls` and
+  `aria-activedescendant`; Up/Down wrap, Enter/Tab pick the highlighted row, Escape closes,
+  blurring the composer closes, mousedown picks without stealing focus. A pick replaces
+  `[token start, caret]` and moves the caret after the mention; a directory pick keeps
+  completion open on the new query. With nothing to pick, Enter closes the menu and submits.
+- The pick never sends and never reads file content; the mention is plain prompt text.
+- Committed user bubbles split their text with the primary reference rule (quoted paths
+  preserved, trailing sentence punctuation trimmed) and render file/folder references as
+  inert `sc-ref-chip` text nodes (no click, no HTML injection); directory labels keep the
+  trailing slash.
 
 ### Usage dock (bottom row)
 
@@ -237,7 +280,8 @@ Performance & usage detailed/compact preference.
   parent), the status-bar new-side-chat button (`tab.new`), status bar, empty state, composer
   placeholder, send/stop labels, thinking indicator, reasoning/tool fold titles,
   pending-message state, context and steering tags, the usage dock, and error text keyed by
-  host error code.
+  host error code. The `@` menu adds `reference.menu` (listbox aria), `reference.loading` and
+  `reference.empty` (status rows).
 - Dock keys, in the same namespace: `dock.tokens` (compact total), `dock.cacheHit`
   (percentage), `dock.contextAria` (accessible percentage), `dock.contextTitle` (approximate
   `~used / window`), `dock.usageTitle` (exact bucket counts), `dock.usageTitleWithWrite`

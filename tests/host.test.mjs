@@ -12,6 +12,7 @@ import {
   LiveAttemptState,
   projectQueue,
   recentMainContext,
+  referenceCandidates,
   requestContextWindow,
   routeHandler,
   sideConversationBoundaryPrompt,
@@ -376,6 +377,7 @@ test('apply registers every contract route', () => {
     `${ROUTE_PREFIX}events`,
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
+    `${ROUTE_PREFIX}references`,
     `${ROUTE_PREFIX}snapshot`,
     `${ROUTE_PREFIX}status`,
   ])
@@ -1398,4 +1400,262 @@ test('snapshot and hello carry the side session context window only when one is 
   }
   const throwing = await post(runtime, 'snapshot', { sessionId })
   assert.equal(Object.hasOwn(throwing.body, 'contextWindow'), false, 'a throwing requestContext is contained')
+})
+
+// --- @file references (P1a host half) --------------------------------------
+
+function referenceProvider(result, calls = []) {
+  return {
+    fileReferences: {
+      list(agent, query, signal) {
+        calls.push({ agent, query, signal })
+        if (result instanceof Error) throw result
+        if (typeof result === 'function') return result(agent, query, signal)
+        return result
+      },
+    },
+  }
+}
+
+async function postReferences(runtime, args) {
+  const route = runtime.routes.get(`${ROUTE_PREFIX}references`)
+  assert.ok(route !== undefined, 'route references is registered')
+  const req = makeStreamRequest(typeof args === 'string' ? args : JSON.stringify(args ?? {}))
+  const res = makeStreamResponse()
+  await route.handler(req, res)
+  const rawText = res.text()
+  return {
+    req,
+    res,
+    status: res.statusCode,
+    headers: res.headers,
+    rawBody: rawText,
+    body: rawText === '' ? undefined : JSON.parse(rawText),
+  }
+}
+
+async function waitFor(predicate) {
+  for (let index = 0; index < 100; index += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  assert.fail('condition was never met')
+}
+
+test('referenceCandidates keeps only well-formed file and directory paths', () => {
+  assert.deepEqual(referenceCandidates([
+    { path: 'src/a.js', kind: 'file' },
+    { path: 'src/', kind: 'directory', size: 12 },
+    { path: '', kind: 'file' },
+    { kind: 'file' },
+    { path: 7, kind: 'file' },
+    { path: 'img.png', kind: 'image' },
+    null,
+    'nope',
+  ]), [
+    { path: 'src/a.js', kind: 'file' },
+    { path: 'src/', kind: 'directory' },
+  ])
+  assert.deepEqual(referenceCandidates(undefined), [])
+  assert.deepEqual(referenceCandidates('nope'), [])
+})
+
+test('references lists parent-workspace candidates by sourceId before a side session exists', async () => {
+  const parent = makeParent()
+  const calls = []
+  const runtime = makeRuntime({
+    parents: [parent],
+    services: referenceProvider([
+      { path: 'src/a.js', kind: 'file' },
+      { path: 'src/', kind: 'directory', extra: true },
+      { path: 'img.png', kind: 'image' },
+      { kind: 'file' },
+    ], calls),
+  })
+  apply(runtime.ctx)
+
+  const response = await postReferences(runtime, { sourceId: 'main-1', query: 'src' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.deepEqual(response.body, {
+    ok: true,
+    candidates: [
+      { path: 'src/a.js', kind: 'file' },
+      { path: 'src/', kind: 'directory' },
+    ],
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].agent, parent)
+  assert.equal(calls[0].query, 'src')
+  assert.ok(calls[0].signal instanceof AbortSignal)
+  assert.equal(calls[0].signal.aborted, false)
+  assert.equal(runtime.created.length, 0, 'the route never creates a side session')
+  assert.equal(response.req.listeners.has('close'), false, 'the request close listener is detached')
+  assert.equal(response.res.listeners.has('close'), false, 'the response close listener is detached')
+})
+
+test('references prefers the side session agent and passes the query through unchanged', async () => {
+  const calls = []
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: referenceProvider([{ path: 'dir with space/file.md', kind: 'file' }], calls),
+  })
+  apply(runtime.ctx)
+  const { sessionId, agent } = await startSideSession(runtime)
+
+  const response = await postReferences(runtime, { sessionId, sourceId: 'main-1', query: '  dir with space/' })
+  assert.deepEqual(response.body, { ok: true, candidates: [{ path: 'dir with space/file.md', kind: 'file' }] })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].agent, agent)
+  assert.equal(calls[0].query, '  dir with space/')
+})
+
+test('references rejects unknown sources and sessions this plugin does not own', async () => {
+  const calls = []
+  const runtime = makeRuntime({ parents: [makeParent()], services: referenceProvider([], calls) })
+  apply(runtime.ctx)
+
+  const unknown = await postReferences(runtime, { sourceId: 'nope', query: 'x' })
+  assert.deepEqual(unknown.body, { ok: false, code: 'unknown-source', message: 'unknown source session "nope"' })
+
+  const missing = await postReferences(runtime, { query: 'x' })
+  assert.deepEqual(missing.body, { ok: false, code: 'bad-request', message: 'missing sessionId or sourceId' })
+
+  const foreign = await postReferences(runtime, { sessionId: 'side-chat-other', sourceId: 'main-1', query: 'x' })
+  assert.deepEqual(foreign.body, { ok: false, code: 'not-found' })
+
+  assert.equal(calls.length, 0, 'no provider lookup runs without a resolved agent')
+
+  const fallback = await postReferences(runtime, { sessionId: '', sourceId: 'main-1', query: '' })
+  assert.deepEqual(fallback.body, { ok: true, candidates: [] })
+  assert.equal(calls.length, 1, 'an empty sessionId falls back to the parent sourceId')
+})
+
+test('references validates the query string and its 512-character cap', async () => {
+  const calls = []
+  const runtime = makeRuntime({ parents: [makeParent()], services: referenceProvider([], calls) })
+  apply(runtime.ctx)
+
+  for (const query of [undefined, null, 7, ['src'], { text: 'src' }]) {
+    const response = await postReferences(runtime, { sourceId: 'main-1', query })
+    assert.equal(response.body.ok, false)
+    assert.equal(response.body.code, 'bad-request')
+    assert.match(response.body.message, /query must be a string/)
+  }
+
+  const overLong = await postReferences(runtime, { sourceId: 'main-1', query: 'x'.repeat(513) })
+  assert.equal(overLong.body.ok, false)
+  assert.equal(overLong.body.code, 'bad-request')
+
+  const atCap = await postReferences(runtime, { sourceId: 'main-1', query: 'x'.repeat(512) })
+  assert.deepEqual(atCap.body, { ok: true, candidates: [] })
+  const empty = await postReferences(runtime, { sourceId: 'main-1', query: '' })
+  assert.deepEqual(empty.body, { ok: true, candidates: [] })
+  assert.deepEqual(calls.map((call) => call.query), ['x'.repeat(512), ''])
+  assert.equal(calls.length, 2, 'no provider lookup runs for an invalid query')
+})
+
+test('references answers unavailable when the provider is absent or degraded', async () => {
+  const absent = makeRuntime({ parents: [makeParent()] })
+  apply(absent.ctx)
+  assert.deepEqual((await postReferences(absent, { sourceId: 'main-1', query: 'x' })).body, {
+    ok: false,
+    code: 'unavailable',
+    message: 'file reference provider is unavailable',
+  })
+
+  const degraded = makeRuntime({ parents: [makeParent()], services: { fileReferences: {} } })
+  apply(degraded.ctx)
+  assert.equal((await postReferences(degraded, { sourceId: 'main-1', query: 'x' })).body.code, 'unavailable')
+
+  const throwing = makeRuntime({ parents: [makeParent()], services: referenceProvider(new Error('scan failed')) })
+  apply(throwing.ctx)
+  const failed = await postReferences(throwing, { sourceId: 'main-1', query: 'x' })
+  assert.deepEqual(failed.body, { ok: false, code: 'unavailable', message: 'scan failed' })
+  assert.ok(throwing.warnings.some((warning) => warning.includes('file reference lookup failed')))
+})
+
+test('references folds malformed bodies into internal and treats an empty body as no identity', async () => {
+  const runtime = makeRuntime({ parents: [makeParent()] })
+  apply(runtime.ctx)
+
+  const malformed = await postReferences(runtime, '{not json')
+  assert.equal(malformed.status, 200)
+  assert.equal(malformed.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.equal(malformed.body.ok, false)
+  assert.equal(malformed.body.code, 'internal')
+  assert.match(malformed.body.message, /invalid request body/)
+
+  const nonObject = await postReferences(runtime, '[]')
+  assert.equal(nonObject.body.code, 'internal')
+
+  const empty = await postReferences(runtime, '')
+  assert.deepEqual(empty.body, { ok: false, code: 'bad-request', message: 'missing sessionId or sourceId' })
+})
+
+test('references aborts the provider lookup and writes no response when the client disconnects', async () => {
+  const calls = []
+  let resolveList
+  const pending = new Promise((resolve) => {
+    resolveList = resolve
+  })
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: {
+      fileReferences: {
+        list(agent, query, signal) {
+          calls.push({ agent, query, signal })
+          return pending
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+
+  const route = runtime.routes.get(`${ROUTE_PREFIX}references`)
+  assert.ok(route !== undefined, 'route references is registered')
+  const req = makeStreamRequest(JSON.stringify({ sourceId: 'main-1', query: 'src' }))
+  const res = makeStreamResponse()
+  const handler = route.handler(req, res)
+
+  await waitFor(() => calls.length === 1)
+  const close = req.listeners.get('close')
+  assert.equal(typeof close, 'function', 'the route observes request close')
+  close()
+  assert.equal(calls[0].signal.aborted, true, 'the provider signal is aborted on disconnect')
+
+  resolveList([{ path: 'src/a.js', kind: 'file' }])
+  await handler
+  assert.equal(res.statusCode, undefined, 'no response status is written')
+  assert.equal(res.chunks.length, 0, 'no response body is written')
+  assert.equal(req.listeners.has('close'), false, 'the close listener is detached')
+})
+
+test('references suppresses the response and the warning when the aborted lookup rejects', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: {
+      fileReferences: {
+        list(agent, query, signal) {
+          return new Promise((resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('lookup aborted')))
+          })
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+
+  const route = runtime.routes.get(`${ROUTE_PREFIX}references`)
+  assert.ok(route !== undefined, 'route references is registered')
+  const req = makeStreamRequest(JSON.stringify({ sourceId: 'main-1', query: 'src' }))
+  const res = makeStreamResponse()
+  const handler = route.handler(req, res)
+
+  await waitFor(() => req.listeners.has('close'))
+  req.listeners.get('close')()
+  await handler
+  assert.equal(res.statusCode, undefined, 'no response status is written')
+  assert.equal(res.chunks.length, 0, 'no response body is written')
+  assert.equal(runtime.warnings.length, 0, 'a cancelled lookup is not a failure')
 })

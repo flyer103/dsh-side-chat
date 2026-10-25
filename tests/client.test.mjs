@@ -2307,3 +2307,710 @@ test('the tab body renders the dock under the composer and hides it without metr
   const legacyTree = bodyElement.type(bodyElement.props)
   assert.equal(legacyTree.children[2].children[1], null, 'a fabricated state without dock fields keeps working')
 })
+
+// ---- P1a `@file` references ----
+
+function createDeferredReferenceStub(handlers = {}) {
+  const calls = []
+  const pending = []
+  const fetchImpl = async (url, init) => {
+    const name = url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url
+    const body = init === undefined || init.body === undefined ? {} : JSON.parse(init.body)
+    const signal = init === undefined ? undefined : init.signal
+    calls.push({ url, name, body, signal })
+    if (name === 'references') {
+      return new Promise((resolve) => {
+        pending.push({
+          body,
+          signal,
+          resolve(payload) {
+            resolve({ ok: true, status: 200, json: async () => payload })
+          }
+        })
+      })
+    }
+    const handler = handlers[name]
+    const payload = typeof handler === 'function' ? handler(body) : (handler === undefined ? { ok: true } : handler)
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  return {
+    fetchImpl,
+    calls,
+    pending,
+    referenceCalls: () => calls.filter((call) => call.name === 'references')
+  }
+}
+
+function panelRenderer() {
+  const { exports } = loadBundle({ primitives: true })
+  const { registered } = applyBundle(exports)
+  const bodyRegistration = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const props = bodyRegistration.options.inject('session-1')
+  return { exports, bodyRegistration, props }
+}
+
+function panelState(overrides = {}) {
+  return {
+    mainId: 'main-1',
+    sessionId: null,
+    inheritedEventCount: null,
+    nextSeq: null,
+    entries: [],
+    nodes: [],
+    visible: true,
+    running: false,
+    status: 'idle',
+    lastError: null,
+    error: null,
+    pollError: null,
+    sending: false,
+    draft: '',
+    pending: [],
+    live: null,
+    metrics: null,
+    contextWindow: null,
+    streamMode: 'poll',
+    streaming: false,
+    timer: null,
+    onVisibility: null,
+    reference: undefined,
+    ...overrides
+  }
+}
+
+function panelRuntime(state, calls = []) {
+  return {
+    subscribe: () => () => {},
+    getVersion: () => 0,
+    open() {},
+    setVisible() {},
+    getState: () => state,
+    setDraft: (id, value) => calls.push(['setDraft', value]),
+    composeDraft: (id, value, caret) => calls.push(['composeDraft', value, caret]),
+    setComposing: (id, composing) => calls.push(['composing', composing]),
+    pickReference: (id, index) => calls.push(['pick', index]),
+    moveReference: (id, delta) => calls.push(['move', delta]),
+    closeReferences: () => calls.push(['close']),
+    send: async () => { calls.push(['send']) },
+    cancel: async () => {}
+  }
+}
+
+function renderPanel(bodyRegistration, props, state, t = (key) => key) {
+  const bodyElement = bodyRegistration.component({
+    runtime: panelRuntime(state),
+    sessionId: 'main-1',
+    t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  return bodyElement.type(bodyElement.props)
+}
+
+function composerOf(tree) {
+  return findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-composer')
+}
+
+test('activeAtToken replicates the primary composer grammar', () => {
+  const { exports } = loadBundle()
+  assert.deepEqual(exports.activeAtToken('@', 1), { prefix: '@', query: '', quoted: false })
+  assert.deepEqual(exports.activeAtToken('hello @li', 9), { prefix: '@li', query: 'li', quoted: false })
+  assert.equal(exports.activeAtToken('mail foo@bar.com', 16), undefined, 'an @ inside an email is not a trigger')
+  assert.deepEqual(exports.activeAtToken('a @"path with', 13), { prefix: '@"path with', query: 'path with', quoted: true })
+  assert.equal(exports.activeAtToken('@a', 0), undefined)
+  assert.equal(exports.activeAtToken('see @a rest', 11), undefined, 'a token must touch the caret')
+  assert.equal(exports.activeAtToken('@"a b"', 7), undefined, 'a closed quote ends completion')
+  assert.equal(exports.activeAtToken('', 0), undefined)
+})
+
+test('activeTokenAt reports the absolute replace range on the current line', () => {
+  const { exports } = loadBundle()
+  const text = 'first line\nsee @lib/a.js'
+  const start = text.indexOf('@lib/a.js')
+  assert.deepEqual(exports.activeTokenAt(text, text.length), {
+    start,
+    prefix: '@lib/a.js',
+    query: 'lib/a.js',
+    quoted: false
+  })
+  assert.deepEqual(exports.activeTokenAt('see @lib/a.js', 'see @li'.length), {
+    start: 4,
+    prefix: '@li',
+    query: 'li',
+    quoted: false
+  })
+  assert.equal(exports.activeTokenAt('plain text', 10), undefined)
+  assert.equal(exports.activeTokenAt('', 0), undefined)
+})
+
+test('formatFileMention spells a pick like the primary composer', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.formatFileMention({ path: 'lib/a.js', kind: 'file' }, false), '@lib/a.js')
+  assert.equal(exports.formatFileMention({ path: 'my notes.md', kind: 'file' }, false), '@"my notes.md"')
+  assert.equal(exports.formatFileMention({ path: 'my notes.md', kind: 'file' }, true), '@"my notes.md"')
+  assert.equal(exports.formatFileMention({ path: 'lib', kind: 'directory' }, false), '@lib/')
+  assert.equal(exports.formatFileMention({ path: 'lib', kind: 'directory' }, true), '@"lib/')
+  assert.equal(exports.formatFileMention({ path: 'my docs', kind: 'directory' }, false), '@"my docs/')
+  assert.equal(exports.formatFileMention({ path: 'bad\u0001name', kind: 'file' }, false), undefined)
+  assert.equal(exports.formatFileMention({ path: 'say "hi"', kind: 'file' }, false), undefined)
+  assert.equal(exports.formatFileMention(null, false), undefined)
+})
+
+test('applyReferencePick replaces [token start, caret] and continues inside a directory', () => {
+  const { exports } = loadBundle()
+  const file = exports.applyReferencePick(
+    'see @li rest',
+    7,
+    { start: 4, query: 'li', quoted: false },
+    { path: 'lib/a.js', kind: 'file' },
+    false
+  )
+  assert.deepEqual(file, { text: 'see @lib/a.js rest', caret: 13, kind: 'file', token: undefined })
+
+  const directory = exports.applyReferencePick(
+    '@do',
+    3,
+    { start: 0, query: 'do', quoted: false },
+    { path: 'docs', kind: 'directory' },
+    false
+  )
+  assert.deepEqual(directory, {
+    text: '@docs/',
+    caret: 6,
+    kind: 'directory',
+    token: { start: 0, prefix: '@docs/', query: 'docs/', quoted: false }
+  })
+
+  const quoted = exports.applyReferencePick(
+    '@"my do',
+    7,
+    { start: 0, query: 'my do', quoted: true },
+    { path: 'my docs', kind: 'directory' },
+    true
+  )
+  assert.equal(quoted.text, '@"my docs/')
+  assert.equal(quoted.caret, 10)
+  assert.deepEqual(quoted.token, { start: 0, prefix: '@"my docs/', query: 'my docs/', quoted: true })
+
+  assert.equal(exports.applyReferencePick('@ba', 3, { start: 0, query: 'ba' }, { path: 'bad\u0001', kind: 'file' }, false), null)
+  assert.equal(exports.applyReferencePick('', 0, null, { path: 'a', kind: 'file' }, false), null)
+})
+
+test('splitReferenceText tokenizes committed references and trims trailing punctuation', () => {
+  const { exports } = loadBundle()
+  assert.deepEqual(exports.splitReferenceText('plain text'), [{ kind: 'text', text: 'plain text' }])
+  assert.deepEqual(exports.splitReferenceText('ping @lib/a.js'), [
+    { kind: 'text', text: 'ping ' },
+    { kind: 'reference', referenceKind: 'file', path: 'lib/a.js', label: 'a.js' }
+  ])
+  assert.deepEqual(exports.splitReferenceText('open @lib/a.js, then'), [
+    { kind: 'text', text: 'open ' },
+    { kind: 'reference', referenceKind: 'file', path: 'lib/a.js', label: 'a.js' },
+    { kind: 'text', text: ', then' }
+  ])
+  assert.deepEqual(exports.splitReferenceText('@docs/ then'), [
+    { kind: 'reference', referenceKind: 'directory', path: 'docs/', label: 'docs' },
+    { kind: 'text', text: ' then' }
+  ])
+  assert.deepEqual(exports.splitReferenceText('open @"my notes.md" now'), [
+    { kind: 'text', text: 'open ' },
+    { kind: 'reference', referenceKind: 'file', path: 'my notes.md', label: 'my notes.md' },
+    { kind: 'text', text: ' now' }
+  ])
+  assert.deepEqual(exports.splitReferenceText('mail foo@bar.com'), [{ kind: 'text', text: 'mail foo@bar.com' }])
+  assert.deepEqual(exports.splitReferenceText('per @a.js， then'), [
+    { kind: 'text', text: 'per ' },
+    { kind: 'reference', referenceKind: 'file', path: 'a.js', label: 'a.js' },
+    { kind: 'text', text: '， then' }
+  ])
+  assert.deepEqual(exports.splitReferenceText('@a.js\n@b/'), [
+    { kind: 'reference', referenceKind: 'file', path: 'a.js', label: 'a.js' },
+    { kind: 'text', text: '\n' },
+    { kind: 'reference', referenceKind: 'directory', path: 'b/', label: 'b' }
+  ])
+  assert.deepEqual(exports.splitReferenceText(''), [])
+})
+
+test('the reference menu state machine arbitrates pick, send and close', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.editorKeyAction({ key: 'Enter' }, { open: true, pickable: true }), 'pick')
+  assert.equal(exports.editorKeyAction({ key: 'Enter' }, { open: true, pickable: false }), 'submit')
+  assert.equal(exports.editorKeyAction({ key: 'Enter' }, { open: false }), 'submit')
+  assert.equal(exports.editorKeyAction({ key: 'Enter', shiftKey: true }, { open: true, pickable: true }), 'newline')
+  assert.equal(exports.editorKeyAction({ key: 'Enter', shiftKey: true }, { open: false }), 'newline')
+  assert.equal(exports.editorKeyAction({ key: 'Enter', isComposing: true }, { open: true, pickable: true }), 'none', 'a composing Enter reaches nothing')
+  assert.equal(exports.editorKeyAction({ key: 'Enter', keyCode: 229 }, { open: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'Enter' }, { open: false, composing: true }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'Tab' }, { open: true, pickable: true }), 'pick')
+  assert.equal(exports.editorKeyAction({ key: 'Tab' }, { open: true, pickable: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'Tab' }, { open: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'Escape' }, { open: true, pickable: false }), 'close')
+  assert.equal(exports.editorKeyAction({ key: 'Escape' }, { open: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'ArrowDown' }, { open: true, pickable: true }), 'next')
+  assert.equal(exports.editorKeyAction({ key: 'ArrowUp' }, { open: true, pickable: true }), 'prev')
+  assert.equal(exports.editorKeyAction({ key: 'ArrowDown' }, { open: true, pickable: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'ArrowDown' }, { open: false }), 'none')
+  assert.equal(exports.editorKeyAction({ key: 'a' }, { open: true, pickable: true }), 'none')
+  assert.equal(exports.editorKeyAction(null, { open: true, pickable: true }), 'none')
+
+  assert.equal(exports.nextReferenceIndex(3, 2, 1), 0)
+  assert.equal(exports.nextReferenceIndex(3, 0, -1), 2)
+  assert.equal(exports.nextReferenceIndex(2, 0, 2), 0)
+  assert.equal(exports.nextReferenceIndex(3, 1, 1), 2)
+  assert.equal(exports.nextReferenceIndex(0, 0, 1), 0)
+
+  assert.equal(exports.referenceMenuOpen({ status: 'ready', token: { start: 0 } }), true)
+  assert.equal(exports.referenceMenuOpen({ status: 'loading', token: { start: 0 } }), true)
+  assert.equal(exports.referenceMenuOpen({ status: 'empty', token: { start: 0 } }), true)
+  assert.equal(exports.referenceMenuOpen({ status: 'closed', token: null }), false)
+  assert.equal(exports.referenceMenuOpen({ status: 'unavailable', token: { start: 0 } }), false)
+  assert.equal(exports.referenceMenuOpen(null), false)
+})
+
+test('referenceMenuOf renders a listbox whose mousedown pick keeps textarea focus', () => {
+  const { exports } = loadBundle()
+  const t = (key) => key
+  const picked = []
+  const menu = exports.referenceMenuOf(t, {
+    status: 'ready',
+    token: { start: 0, query: 'l', quoted: false },
+    activeIndex: 1,
+    candidates: [{ path: 'lib/a.js', kind: 'file' }, { path: 'lib', kind: 'directory' }]
+  }, 'sc-ref-menu-main-1', (index) => picked.push(index))
+  assert.equal(menu.props.className, 'sc-ref-menu')
+  assert.equal(menu.props.id, 'sc-ref-menu-main-1')
+  assert.equal(menu.props.role, 'listbox')
+  assert.equal(menu.props['aria-label'], 'reference.menu')
+  const rows = menu.children[0]
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].props.id, 'sc-ref-menu-main-1-option-0')
+  assert.equal(rows[0].props.role, 'option')
+  assert.equal(rows[0].props['aria-selected'], false)
+  assert.equal(rows[0].props.onClick, undefined, 'rows have no click handler; mousedown keeps focus')
+  assert.equal(rows[1].props.className, 'sc-ref-option sc-ref-option-active')
+  assert.equal(rows[1].props['aria-selected'], true)
+  assert.deepEqual(rows[0].children[1].children, ['a.js'])
+  assert.deepEqual(rows[0].children[2].children, ['lib/'], 'a row shows the parent directory that tells same-named paths apart')
+  assert.deepEqual(rows[1].children[1].children, ['lib/'])
+  assert.equal(rows[1].children[2], null, 'a top-level row carries no parent hint')
+  let prevented = 0
+  rows[1].props.onMouseDown({ preventDefault: () => { prevented += 1 } })
+  assert.equal(prevented, 1)
+  assert.deepEqual(picked, [1])
+
+  const loading = exports.referenceMenuOf(t, {
+    status: 'loading',
+    token: { start: 0 },
+    candidates: [],
+    activeIndex: 0
+  }, 'm', null)
+  assert.equal(loading.children[0][0].props.className, 'sc-ref-status')
+  assert.deepEqual(loading.children[0][0].children, ['reference.loading'])
+  const empty = exports.referenceMenuOf(t, {
+    status: 'empty',
+    token: { start: 0 },
+    candidates: [],
+    activeIndex: 0
+  }, 'm', null)
+  assert.deepEqual(empty.children[0][0].children, ['reference.empty'])
+  assert.equal(exports.referenceMenuOf(t, { status: 'closed', token: null }, 'm', null), null)
+})
+
+test('composer typing debounces one reference lookup and only sends the latest query', async () => {
+  const deferred = createDeferredReferenceStub()
+  const { scheduler, runtime } = createRuntimeWith(deferred)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  assert.equal(scheduler.pending(), 1, 'the lookup is debounced')
+  runtime.composeDraft('main-1', '@ab', 3)
+  runtime.composeDraft('main-1', '@abc', 4)
+  assert.equal(scheduler.pending(), 1, 'each keystroke reschedules the one debounce timer')
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.referenceCalls().length, 1)
+  assert.deepEqual(deferred.referenceCalls()[0].body, { query: 'abc', sourceId: 'main-1' })
+  assert.equal(runtime.getState('main-1').draft, '@abc')
+  assert.equal(runtime.getState('main-1').reference.status, 'loading')
+  deferred.pending[0].resolve({ ok: true, candidates: [{ path: 'abc.txt', kind: 'file' }] })
+  await flush()
+  const reference = runtime.getState('main-1').reference
+  assert.equal(reference.status, 'ready')
+  assert.deepEqual(reference.candidates, [{ path: 'abc.txt', kind: 'file' }])
+  assert.equal(reference.activeIndex, 0)
+  await runtime.close('main-1')
+})
+
+test('a newer lookup aborts the in-flight one and a late answer is dropped', async () => {
+  const deferred = createDeferredReferenceStub()
+  const { scheduler, runtime } = createRuntimeWith(deferred)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.pending.length, 1)
+  const first = deferred.pending[0]
+  assert.equal(first.signal.aborted, false)
+  runtime.composeDraft('main-1', '@ab', 3)
+  assert.equal(first.signal.aborted, true, 'the superseded request is aborted immediately')
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.pending.length, 2)
+  deferred.pending[1].resolve({ ok: true, candidates: [{ path: 'ab.txt', kind: 'file' }] })
+  await flush()
+  assert.deepEqual(runtime.getState('main-1').reference.candidates, [{ path: 'ab.txt', kind: 'file' }])
+  deferred.pending[0].resolve({ ok: true, candidates: [{ path: 'stale.txt', kind: 'file' }] })
+  await flush()
+  assert.deepEqual(runtime.getState('main-1').reference.candidates, [{ path: 'ab.txt', kind: 'file' }], 'the stale answer is dropped')
+  assert.equal(deferred.referenceCalls().length, 2)
+  await runtime.close('main-1')
+})
+
+test('an unavailable provider hides the menu for that tab and stops querying', async () => {
+  const fetchStub = createFetchStub({ references: { ok: false, code: 'unavailable', message: 'no provider' } })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  scheduler.runAll()
+  await flush()
+  const state = runtime.getState('main-1')
+  assert.equal(state.reference.status, 'unavailable')
+  assert.equal(state.reference.token, null)
+  runtime.composeDraft('main-1', '@ab', 3)
+  assert.equal(scheduler.pending(), 0, 'no further lookup is scheduled once unavailable')
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`).length, 1)
+  await runtime.close('main-1')
+})
+
+test('a query longer than the host cap keeps the menu closed and sends nothing to the host', async () => {
+  const fetchStub = createFetchStub({ references: { ok: true, candidates: [] } })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  const long = `@${'a'.repeat(513)}`
+  runtime.composeDraft('main-1', long, long.length)
+  assert.equal(scheduler.pending(), 0, 'no lookup is scheduled for an over-long query')
+  assert.equal(runtime.getState('main-1').reference.status, 'closed')
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`).length, 0)
+  await runtime.close('main-1')
+})
+
+test('a rejected lookup closes the menu and keeps the draft', async () => {
+  const fetchStub = createFetchStub({ references: { ok: false, code: 'unknown-source' } })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  scheduler.runAll()
+  await flush()
+  const state = runtime.getState('main-1')
+  assert.equal(state.reference.status, 'closed')
+  assert.equal(state.reference.token, null)
+  assert.equal(state.draft, '@a')
+  await runtime.close('main-1')
+})
+
+test('a pick inserts the primary spelling, writes back the caret and keeps a directory menu open', async () => {
+  const fetchStub = createFetchStub({
+    references: (body) => {
+      if (body.query === 'li') return { ok: true, candidates: [{ path: 'lib/a.js', kind: 'file' }] }
+      if (body.query === 'my') return { ok: true, candidates: [{ path: 'my notes.md', kind: 'file' }] }
+      if (body.query === 'do') return { ok: true, candidates: [{ path: 'docs', kind: 'directory' }] }
+      if (body.query === 'docs/') return { ok: true, candidates: [{ path: 'docs/guide.md', kind: 'file' }] }
+      return { ok: true, candidates: [] }
+    }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+
+  runtime.composeDraft('main-1', 'see @li', 7)
+  scheduler.runAll()
+  await flush()
+  runtime.pickReference('main-1', 0)
+  let state = runtime.getState('main-1')
+  assert.equal(state.draft, 'see @lib/a.js')
+  assert.equal(state.composerCaret, 13)
+  assert.equal(state.reference.status, 'closed')
+  assert.equal(state.reference.caret, 13)
+  assert.equal(state.reference.caretRequest, 1)
+
+  runtime.composeDraft('main-1', '@"my', 4)
+  scheduler.runAll()
+  await flush()
+  assert.equal(runtime.getState('main-1').reference.token.quoted, true)
+  runtime.pickReference('main-1')
+  state = runtime.getState('main-1')
+  assert.equal(state.draft, '@"my notes.md"')
+  assert.equal(state.composerCaret, 14)
+
+  runtime.composeDraft('main-1', '@do', 3)
+  scheduler.runAll()
+  await flush()
+  runtime.pickReference('main-1')
+  state = runtime.getState('main-1')
+  assert.equal(state.draft, '@docs/')
+  assert.equal(state.composerCaret, 6)
+  assert.deepEqual(state.reference.token, { start: 0, prefix: '@docs/', query: 'docs/', quoted: false })
+  assert.equal(scheduler.pending(), 1, 'the directory continuation is scheduled immediately')
+  scheduler.runAll()
+  await flush()
+  const referenceCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`)
+  assert.deepEqual(referenceCalls[referenceCalls.length - 1].body, { query: 'docs/', sourceId: 'main-1' })
+  assert.deepEqual(runtime.getState('main-1').reference.candidates, [{ path: 'docs/guide.md', kind: 'file' }])
+  await runtime.close('main-1')
+})
+
+test('the reference lookup sends the parent sourceId until the side session exists', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [] },
+    references: { ok: true, candidates: [{ path: 'lib/a.js', kind: 'file' }] }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@li', 3)
+  scheduler.runAll()
+  await flush()
+  const referenceCalls = () => fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`)
+  assert.deepEqual(referenceCalls()[0].body, { query: 'li', sourceId: 'main-1' })
+
+  await runtime.send('main-1', 'read @lib/a.js')
+  runtime.composeDraft('main-1', '@li', 3)
+  scheduler.runAll()
+  await flush()
+  assert.equal(referenceCalls().length, 2)
+  assert.deepEqual(referenceCalls()[1].body, { query: 'li', sessionId: 'side-1' })
+  await runtime.close('main-1')
+})
+
+test('two tabs keep independent reference menus and their own identity', async () => {
+  const deferred = createDeferredReferenceStub()
+  const { scheduler, runtime } = createRuntimeWith(deferred)
+  runtime.open('tab-1', 'main-1')
+  runtime.open('tab-2', 'main-2')
+  runtime.setVisible('tab-1', true)
+  runtime.setVisible('tab-2', true)
+  runtime.composeDraft('tab-1', '@a', 2)
+  runtime.composeDraft('tab-2', '@b', 2)
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.pending.length, 2)
+  assert.deepEqual(deferred.pending[0].body, { query: 'a', sourceId: 'main-1' })
+  assert.deepEqual(deferred.pending[1].body, { query: 'b', sourceId: 'main-2' })
+  deferred.pending[0].resolve({ ok: false, code: 'unavailable' })
+  deferred.pending[1].resolve({ ok: true, candidates: [{ path: 'b.txt', kind: 'file' }] })
+  await flush()
+  assert.equal(runtime.getState('tab-1').reference.status, 'unavailable')
+  assert.equal(runtime.getState('tab-2').reference.status, 'ready')
+  assert.deepEqual(runtime.getState('tab-2').reference.candidates, [{ path: 'b.txt', kind: 'file' }])
+  runtime.composeDraft('tab-2', '@b2', 3)
+  assert.equal(scheduler.pending(), 1, 'only the healthy tab keeps querying')
+  await runtime.close('tab-1')
+  await runtime.close('tab-2')
+})
+
+test('hiding a tab aborts the in-flight lookup and closing drops the pending debounce', async () => {
+  const deferred = createDeferredReferenceStub()
+  const { scheduler, runtime } = createRuntimeWith(deferred)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.pending.length, 1)
+  runtime.setVisible('main-1', false)
+  assert.equal(deferred.pending[0].signal.aborted, true)
+  deferred.pending[0].resolve({ ok: true, candidates: [{ path: 'a.txt', kind: 'file' }] })
+  await flush()
+  assert.equal(runtime.getState('main-1').reference.status, 'closed')
+  assert.deepEqual(runtime.getState('main-1').reference.candidates, [])
+
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@b', 2)
+  assert.equal(scheduler.pending(), 1)
+  await runtime.close('main-1')
+  assert.equal(scheduler.pending(), 0)
+  scheduler.runAll()
+  await flush()
+  assert.equal(deferred.referenceCalls().length, 1, 'a closed tab never sends the debounced lookup')
+})
+
+test('an IME composition neither queries nor sends and closes the menu', async () => {
+  const fetchStub = createFetchStub({ references: { ok: true, candidates: [{ path: 'a.txt', kind: 'file' }] } })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@a', 2)
+  scheduler.runAll()
+  await flush()
+  assert.equal(runtime.getState('main-1').reference.status, 'ready')
+
+  runtime.setComposing('main-1', true)
+  assert.equal(runtime.getState('main-1').reference.composing, true)
+  assert.equal(runtime.getState('main-1').reference.status, 'closed', 'composing closes the open menu')
+  runtime.composeDraft('main-1', '@中', 2)
+  assert.equal(scheduler.pending(), 0, 'no lookup is scheduled while composing')
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`).length, 1)
+
+  runtime.setComposing('main-1', false)
+  runtime.composeDraft('main-1', '@中文', 3)
+  assert.equal(scheduler.pending(), 1)
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`).length, 2)
+  await runtime.close('main-1')
+})
+
+test('setDraft stays a plain draft writer without scheduling a lookup', () => {
+  const fetchStub = createFetchStub({})
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setDraft('main-1', 'see @li')
+  assert.equal(runtime.getState('main-1').draft, 'see @li')
+  assert.equal(scheduler.pending(), 0)
+  assert.equal(fetchStub.calls.length, 0)
+  assert.equal(runtime.getState('main-1').reference.status, 'closed')
+})
+
+test('the panel renders the menu above the textarea and routes keys without submitting', () => {
+  const { bodyRegistration } = panelRenderer()
+  const calls = []
+  const reference = {
+    status: 'ready',
+    candidates: [{ path: 'lib/a.js', kind: 'file' }, { path: 'lib', kind: 'directory' }],
+    activeIndex: 0,
+    token: { start: 4, query: 'li', quoted: false },
+    composing: false,
+    requestId: 1,
+    controller: null,
+    timer: null,
+    caret: 0,
+    caretRequest: 0
+  }
+  const state = panelState({ draft: 'see @li', reference })
+  const runtime = panelRuntime(state, calls)
+  const props = bodyRegistration.options.inject('session-1')
+  const bodyElement = bodyRegistration.component({
+    runtime,
+    sessionId: 'main-1',
+    t: props.t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const tree = bodyElement.type(bodyElement.props)
+  const composer = composerOf(tree)
+  assert.ok(composer !== undefined, 'the composer renders')
+  assert.equal(composer.children[0].props.className, 'sc-ref-menu', 'the menu renders above the textarea')
+  assert.equal(composer.children[0].props.role, 'listbox')
+  assert.equal(composer.children[0].props['aria-label'], '文件引用')
+  const textarea = composer.children[1]
+  assert.equal(textarea.props.className, 'sc-textarea')
+  assert.equal(textarea.props['aria-expanded'], true)
+  assert.equal(textarea.props['aria-controls'], 'sc-ref-menu-main-1')
+  assert.equal(textarea.props['aria-activedescendant'], 'sc-ref-menu-main-1-option-0')
+
+  textarea.props.onChange({ target: { value: 'see @lib', selectionStart: 8 } })
+  assert.deepEqual(calls[calls.length - 1], ['composeDraft', 'see @lib', 8])
+
+  textarea.props.onCompositionStart()
+  assert.deepEqual(calls[calls.length - 1], ['composing', true])
+  textarea.props.onCompositionEnd({ target: { value: 'see @lib', selectionStart: 8 } })
+  assert.deepEqual(calls.slice(-2), [['composing', false], ['composeDraft', 'see @lib', 8]], 'the committed composition re-evaluates the token')
+
+  textarea.props.onBlur()
+  assert.deepEqual(calls[calls.length - 1], ['close'], 'blurring the composer closes the menu')
+
+  textarea.props.onKeyDown({ key: 'Enter', preventDefault: () => {} })
+  assert.deepEqual(calls[calls.length - 1], ['pick', 0], 'Enter picks instead of sending while the menu is open')
+  textarea.props.onKeyDown({ key: 'ArrowDown', preventDefault: () => {} })
+  assert.deepEqual(calls[calls.length - 1], ['move', 1])
+  textarea.props.onKeyDown({ key: 'Escape', preventDefault: () => {} })
+  assert.deepEqual(calls[calls.length - 1], ['close'])
+  textarea.props.onKeyDown({ key: 'Enter', shiftKey: true, preventDefault: () => {} })
+  assert.notEqual(calls[calls.length - 1][0], 'send', 'Shift+Enter keeps a newline')
+
+  reference.status = 'empty'
+  reference.candidates = []
+  const emptyComposer = composerOf(bodyElement.type(bodyElement.props))
+  const emptyTextarea = emptyComposer.children[1]
+  emptyTextarea.props.onKeyDown({ key: 'Enter', preventDefault: () => {} })
+  assert.deepEqual(calls.slice(-2), [['close'], ['send']], 'Enter with no candidate closes the menu and submits')
+  reference.status = 'ready'
+  reference.candidates = [{ path: 'lib/a.js', kind: 'file' }, { path: 'lib', kind: 'directory' }]
+
+  reference.status = 'closed'
+  reference.token = null
+  const closedComposer = composerOf(bodyElement.type(bodyElement.props))
+  assert.equal(closedComposer.children[0], null, 'no menu once the token is gone')
+  const closedTextarea = closedComposer.children[1]
+  assert.equal(closedTextarea.props['aria-expanded'], false)
+  assert.equal(closedTextarea.props['aria-controls'], undefined)
+  closedTextarea.props.onKeyDown({ key: 'Enter', preventDefault: () => {} })
+  assert.deepEqual(calls[calls.length - 1], ['send'], 'Enter without a menu submits')
+
+  reference.status = 'unavailable'
+  const unavailableComposer = composerOf(bodyElement.type(bodyElement.props))
+  assert.equal(unavailableComposer.children[0], null, 'the menu hides once the provider is unavailable')
+})
+
+test('committed user bubbles render file and folder references as inert chips', () => {
+  const { bodyRegistration } = panelRenderer()
+  const state = panelState({
+    nodes: [{
+      kind: 'user',
+      seq: 1,
+      time: 1700000001000,
+      text: 'see @lib/a.js, @docs/ and @"my notes.md" then'
+    }]
+  })
+  const tree = renderPanel(bodyRegistration, bodyRegistration.options.inject('session-1'), state)
+  const body = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-body')
+  const userRow = body.children[0][0]
+  assert.equal(typeof userRow.type, 'function')
+  const bubble = findElement(userRow.type(userRow.props), (element) => element.props !== undefined && element.props.className === 'sc-bubble')
+  assert.ok(bubble !== undefined, 'the user bubble renders')
+  const chips = []
+  collectElements(bubble, (element) => {
+    if (element.props !== undefined && typeof element.props.className === 'string' && element.props.className.startsWith('sc-ref-chip')) {
+      chips.push(element)
+    }
+  })
+  assert.equal(chips.length, 3)
+  assert.deepEqual(chips.map((chip) => chip.children), [['a.js'], ['docs'], ['my notes.md']])
+  assert.deepEqual(chips.map((chip) => chip.props.className), [
+    'sc-ref-chip',
+    'sc-ref-chip sc-ref-chip-dir',
+    'sc-ref-chip'
+  ])
+  assert.deepEqual(chips.map((chip) => chip.props.title), ['lib/a.js', 'docs/', 'my notes.md'])
+  for (const chip of chips) {
+    assert.equal(chip.props.onClick, undefined, 'a chip carries no click action')
+    assert.equal(chip.props.dangerouslySetInnerHTML, undefined, 'a chip never injects HTML')
+  }
+  const content = bubble.children[0]
+  assert.deepEqual(content.filter((part) => typeof part === 'string'), ['see ', ', ', ' and ', ' then'])
+})
+
+test('reference copy is localized and the panel stylesheet ships the menu and chip styles', () => {
+  const { exports } = loadBundle()
+  for (const key of ['reference.menu', 'reference.loading', 'reference.empty']) {
+    assert.equal(typeof exports.ZH_DICT[key], 'string')
+    assert.equal(typeof exports.EN_DICT[key], 'string')
+    assert.notEqual(exports.ZH_DICT[key].trim(), '')
+    assert.notEqual(exports.EN_DICT[key].trim(), '')
+  }
+  assert.equal(exports.REFERENCE_DEBOUNCE_MS, 120)
+  for (const selector of ['.sc-ref-menu', '.sc-ref-option', '.sc-ref-status', '.sc-ref-chip', '.sc-ref-chip-dir']) {
+    assert.ok(exports.PANEL_CSS.includes(selector), `${selector} must ship in the panel stylesheet`)
+  }
+  const { registered, locale } = applyBundle(exports)
+  const t = registered[0].options.inject('session-1').t
+  assert.equal(t('reference.loading'), '正在搜索文件…')
+  assert.equal(t('reference.empty'), '没有匹配的文件')
+  locale.setLocale('en')
+  assert.equal(t('reference.loading'), 'Searching files…')
+  assert.equal(t('reference.empty'), 'No matching files')
+})

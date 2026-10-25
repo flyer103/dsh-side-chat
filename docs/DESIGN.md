@@ -72,7 +72,149 @@ Delta against the existing community plugins:
     cache-write segment when the provider reports it) and `~used / window`; there are no
     dialogs, turns, steps or tok/s, no new route, no extra polling, and no config option.
 
-## P1 (designed, not implemented)
+## P1a — `@file` references (this phase)
+
+The side-chat composer adopts the primary composer's file-reference flow: `@` opens a
+workspace path menu for the side chat's inherited working directory, and a pick inserts the
+same prompt text the primary composer would insert. Model-side semantics are already in
+place — `file-reference-local` installs the stable `FILE_REFERENCE_PROMPT` section on every
+agent that can call `read`, so a side chat receives the same `@path` guidance as the main
+session. This phase therefore adds discovery, insertion and presentation only; it changes no
+prompt, no DSH contract and adds no dependency.
+
+### In scope
+
+1. **Host route** `POST /side-chat/api/references` — a read-only, workspace-bounded path
+   candidate lookup backed by the host's optional `ctx.fileReferences` service. The route
+   exists for side sessions the plugin owns and for the parent session before the side
+   session exists.
+2. **Composer completion** — typing `@` at the start of input or after whitespace opens a
+   candidate menu for the side chat's working directory; typed text narrows it; `@"` opens a
+   quoted path that may contain spaces.
+3. **Insertion** — the pick replaces the active token with exactly the spelling the primary
+   composer produces (`@path`, `@"path with spaces"`, `@dir/`, `@"dir/` when the quote stays
+   open), leaving the caret after it. A directory pick keeps completion open inside that
+   directory.
+4. **IME safety** — no completion request and no send while an input-method composition is
+   in progress; `Enter` never submits a half-composed message.
+5. **Chips** (presentation only) — committed user bubbles render file/folder references as
+   chips using the same token grammar; no click action, no sidebar navigation.
+6. **Graceful absence** — a profile without `ctx.fileReferences` simply has no menu; plain
+   `@` text still sends (without that provider the model also gets no reference guidance
+   section, which is upstream of this plugin).
+
+### Out of scope
+
+- `@session` references, `/` commands and the skill menu, attachments/images, drag & drop,
+  model picker, approval rendering, plan mode (P1b).
+- Reading or attaching file content; a reference is text the model must resolve with `read`.
+- Clicking a chip to open the file in a sidebar; chip menus, directory drill UI beyond the
+  continuation described above, per-profile configuration.
+- Any change to the parent session, the fork boundary, or the DSH prompt/compose contract.
+
+### Contract sketch
+
+`CONTRACT.md` is the shipped wire contract and stays authoritative once this lands; the
+sketch below fixes the semantics for review.
+
+| path | request | response |
+|---|---|---|
+| `/side-chat/api/references` | `{ sourceId?, sessionId?, query }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' }] }` \| `{ ok: false, code, message? }` |
+
+- Exactly one of `sessionId` / `sourceId` must be usable. `sessionId` must name a side
+  session this plugin created; `sourceId` must name a live agent (the parent) and covers the
+  window before the first message creates the side session. When both are sent, `sessionId`
+  wins.
+- Discovery is bounded by the addressed agent's working directory; `query` is the text after
+  `@` and is passed through unchanged. Only path candidates are returned — no file content,
+  no size/type metadata.
+- The provider is optional: `ctx.get('fileReferences')` absent or degraded answers
+  `code: 'unavailable'`; the client then hides the menu for that tab.
+- Errors: `unknown-source` (no such live parent), `not-found` (session not owned by this
+  plugin), `bad-request` (non-string or over-long query, missing identity), `unavailable`,
+  `internal`.
+- The route keeps no cache and no durable state; the existing 1 MB request-body cap applies;
+  `query` is capped at 512 characters. Requests abort their provider lookup when the client
+  disconnects, so fast typing does not leave workspace scans running.
+
+### Editor flow
+
+- **Grammar**: the client replicates the browser-safe `activeAtToken` / `formatFileMention`
+  behaviour (~60 lines with attribution) because the hand-written bundle cannot require
+  `@deepseek-ai/dsh-file-reference/grammar` (not a client package). Unit tests pin the
+  behaviour: token only at line start/after whitespace, `@` inside a word (an email) does not
+  trigger, quoted paths, unsafe characters rejected.
+- **Replaced range**: `[token start, caret]` on the current line. A file pick finishes the
+  token; a directory pick inserts the trailing slash and keeps the menu open on the resulting
+  query.
+- **Fetch**: 120 ms debounce, exactly one request in flight per tab, the previous request
+  aborted, monotonic request id drops stale answers. `sessionId` is sent only after the side
+  session exists; before that the request carries the parent `sourceId`.
+- **Menu**: rendered at the top of the composer card, above the textarea (no portal, no new
+  dependency),
+  listbox semantics with `aria-activedescendant`, Up/Down wrap, Enter/Tab pick, Escape close,
+  click pick; mousedown on a row keeps textarea focus; a pick never submits. A loading or
+  empty menu has nothing to pick, so Enter closes it and submits while Up/Down/Tab stay inert.
+- **Chips**: committed user rows tokenize file and folder references with the primary
+  reference rule (including trailing punctuation trimming) and render text nodes; the chip
+  carries no click handler and no HTML injection.
+
+### Acceptance
+
+- Before the first message and after it, typing `@` in a side-chat tab lists paths of the
+  parent workspace; typing narrows; Enter inserts the path and the send carries it; the model
+  reads the referenced file (no content is sent by the pick).
+- `@"` works for paths with spaces; selecting a directory inserts `@dir/` (or an open quoted
+  form) and immediately lists that directory's children.
+- A profile without the file-reference provider shows no menu; `@` text still sends.
+- Chinese IME: typing `@`/paths during composition opens no menu, `Enter` during composition
+  does not send; after composition the next change behaves normally.
+- Two side-chat tabs hold independent menu state and each queries against its own session.
+- Existing tests, `npm run check` and `npm test` stay green; no main-session behavior changes.
+
+### Adversarial notes (P1a)
+
+- **Before `create` resolves**: the menu addresses the parent agent by `sourceId`, so the
+  very first message can use a reference. A `create` racing a keystroke cannot make the route
+  fail: the next request simply switches to `sessionId` once the session exists.
+- **Parent disposed while the menu is open**: the route answers `unknown-source`; the client
+  closes the menu and keeps the draft. Sending then reports the same `not-found` the panel
+  already handles.
+- **Tab hidden or closed mid-request**: the fetch is aborted and the stale answer dropped;
+  the route holds no state to leak, and the provider lookup is cancelled on disconnect.
+- **Out-of-order answers / retry**: debounce plus monotonic request id; only the newest answer
+  matching the current token is rendered.
+- **Directory continuation**: after a directory pick the caret sits after the trailing slash;
+  the token remains active, so the follow-up lookup lists that directory without a second
+  trigger gesture.
+- **Route abuse**: the route is read-only, bounded by an agent's working directory, and
+  returns names only. It accepts any live `sourceId`, the same trust boundary `create`
+  already crosses (which creates an agent in that workspace); it never reads file content and
+  never answers for sessions the plugin does not own.
+- **Provider absent or slow**: `unavailable` is cached per tab; slow lookups are aborted by
+  the next keystroke rather than queued.
+- **Unsafe mentions**: `formatFileMention` rejects control characters and embedded quotes, so
+  those candidates are not inserted (the raw text stands); the menu never renders candidate
+  text as HTML.
+- **IME + Enter + menu**: pick, send and close are mutually exclusive key paths; a composing
+  Enter reaches neither pick nor send.
+- **Two tabs**: menu state lives in the per-tab runtime record, not in module scope.
+
+### Delivery slices
+
+1. Host route + route tests (inert until the client uses it).
+2. Client grammar, token replacement and their tests (no UI yet).
+3. Client menu + debounced fetch + styles + locale keys + tests.
+4. IME guard + reference chips + tests.
+5. User docs (CONTRACT/USAGE/README) once behaviour lands; a version bump/release commit is
+   separate and not part of this slice.
+
+### Rollback
+
+The route registration and menu rendering are additive. Reverting the slices removes them;
+there is no persistence, schema or prompt change to migrate.
+
+## P1b (designed, not implemented)
 
 - Model picker for the side session.
 - Surfacing the side session's **approval prompts** in the panel (today the side session
