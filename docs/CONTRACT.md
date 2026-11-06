@@ -188,8 +188,16 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress.
-- Assistant bodies prefer the shell's `MarkdownText`; a lightweight built-in renderer is the
-  fallback when that module is unavailable (it ignores `streaming`).
+- Assistant bodies render through the shell's `MarkdownText` (GFM: tables, task lists, code
+  fences, footnotes, KaTeX; raw HTML stays literal text). The seed module exports it as a
+  `React.memo` component, so detection accepts a component object (`$$typeof`), not only a
+  function; the renderer receives `streaming` and a reference-stable `labels` object built
+  from the active locale seat (`markdown.copy`, `markdown.copied`,
+  `markdown.codeBlock.title`, `markdown.codeBlock.wrap`, `markdown.codeBlock.unwrap`,
+  `markdown.footnotes`). A lightweight built-in renderer is the fallback only when the
+  module or its `MarkdownText` export is missing; it ignores `streaming`, treats `\|` as a
+  literal pipe inside a table cell, and pads/truncates every row to the header's column
+  count.
 
 ### Reference completion (`@file`)
 

@@ -41,8 +41,11 @@ function createReactStub() {
 
 function createPrimitivesStub() {
   const component = (name) => (props) => ({ type: name, props: props === null ? {} : props })
+  // The shell exports `MarkdownText` as a `React.memo` component: an object with
+  // `$$typeof`, not a function. Keep the stub shaped like the real seed module.
+  const MarkdownText = { $$typeof: Symbol.for('react.memo'), type: component('MarkdownText'), compare: null }
   return {
-    MarkdownText: component('MarkdownText'),
+    MarkdownText,
     IconCloseOutlineRegular: component('IconCloseOutlineRegular'),
     IconSendOutlineRegular: component('IconSendOutlineRegular'),
     IconStopFillRegular: component('IconStopFillRegular'),
@@ -446,6 +449,17 @@ function findElement(tree, predicate) {
     if (found === undefined && predicate(element)) found = element
   })
   return found
+}
+
+/** Render one element through the function or `memo` component behind its type. */
+function expandElement(element) {
+  assert.ok(element !== null && element !== undefined, 'element must exist')
+  const type = element.type
+  const component = typeof type === 'function'
+    ? type
+    : (type !== null && typeof type === 'object' ? type.type : undefined)
+  assert.equal(typeof component, 'function', 'element type must be renderable')
+  return component(element.props)
 }
 
 function flush() {
@@ -1182,6 +1196,109 @@ test('fallback markdown covers code fences, headings, lists, tables and inline m
   assert.ok(flat.includes('sc-inline-code'))
   assert.ok(flat.includes('strong'))
   assert.ok(flat.includes('sc-md-a'))
+})
+
+test('fallback markdown keeps a GFM escaped pipe inside one table cell and normalizes columns', () => {
+  const { exports } = loadBundle()
+  const text = [
+    '| 位置 | 改动 |',
+    '| --- | --- |',
+    '| §2 编辑矩阵 | 新增行：`单元格多行 \\| 同一 <p> 内用 <br/> 分行` |',
+    '| §3 验证第 6 条 | 短 |'
+  ].join('\n')
+  const table = exports.renderMarkdownFallback(text, 'md').find((block) => block.type === 'table')
+  assert.ok(table !== undefined, 'the escaped pipe must not break the table block')
+  const rows = table.children[0].children[0]
+  assert.equal(rows.length, 3, 'header plus two body rows')
+  for (const row of rows) {
+    assert.equal(row.children[0].length, 2, 'every row keeps the header column count')
+  }
+  const cellText = (cell) => cell.children[0]
+    .map((node) => (typeof node === 'string' ? node : node.children[0]))
+    .join('')
+  assert.equal(cellText(rows[1].children[0][1]), '新增行：单元格多行 | 同一 <p> 内用 <br/> 分行')
+  const codeNode = rows[1].children[0][1].children[0].find((node) => node !== null && typeof node === 'object')
+  assert.ok(codeNode !== undefined, 'the inline code span still renders as code')
+  assert.equal(codeNode.children[0], '单元格多行 | 同一 <p> 内用 <br/> 分行', 'the escape backslash is dropped')
+})
+
+/** One assistant row whose single text block is `text`, on a settled panel state. */
+function assistantPanelState(text) {
+  return {
+    mainId: 'main-1',
+    sessionId: 'side-1',
+    inheritedEventCount: 0,
+    nextSeq: 2,
+    entries: [],
+    nodes: [
+      { kind: 'user', seq: 0, time: 1700000000000, text: 'question' },
+      { kind: 'assistant', seq: 1, time: 1700000001000, blocks: [{ kind: 'text', text }] }
+    ],
+    visible: true,
+    running: false,
+    status: 'idle',
+    lastError: null,
+    error: null,
+    pollError: null,
+    sending: false,
+    draft: '',
+    pending: [],
+    live: null,
+    streamMode: 'poll',
+    streaming: false,
+    timer: null,
+    onVisibility: null
+  }
+}
+
+function renderAssistantPanel(text, options = {}) {
+  const { exports } = loadBundle({ primitives: options.primitives === true })
+  const { registered, locale } = applyBundle(exports)
+  const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const t = options.t === undefined ? locale.bind(NS) : options.t
+  const panel = renderPanel(body, {}, assistantPanelState(text), t)
+  const row = findElement(panel, (element) =>
+    element.props !== undefined &&
+    Array.isArray(element.props.blocks) &&
+    element.props.blocks.length === 1 &&
+    element.props.blocks[0].text === text)
+  assert.ok(row !== undefined, 'the assistant row renders')
+  const tree = expandElement(row)
+  const markdown = findElement(tree, (element) => element.props !== undefined && element.props.text === text)
+  assert.ok(markdown !== undefined, 'assistant text renders one Markdown element')
+  return { tree, markdown, t }
+}
+
+test('the panel renders assistant Markdown through the shell memo component', () => {
+  const text = '| a | b |\n| --- | --- |\n| 1 | 2 |'
+  const { tree, markdown } = renderAssistantPanel(text, { primitives: true })
+  const shell = expandElement(markdown)
+  assert.equal(typeof shell.type, 'object', 'the shell MarkdownText is a memo component, not a function')
+  assert.equal(shell.type.$$typeof, Symbol.for('react.memo'))
+  assert.equal(shell.props.text, text)
+  assert.equal(shell.props.streaming, false)
+  assert.deepEqual(shell.props.labels, {
+    code: {
+      copyLabel: '复制',
+      copiedLabel: '复制成功',
+      toolbarLabels: { codeLabel: '代码块', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' }
+    },
+    footnotes: '脚注'
+  })
+  assert.equal(
+    findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-md'),
+    undefined,
+    'the built-in fallback is not used while the shell renderer is available'
+  )
+  assert.equal(expandElement(markdown).props.labels, shell.props.labels, 'labels stay reference-stable for one locale seat')
+})
+
+test('without the shell MarkdownText the panel falls back to the built-in renderer', () => {
+  const text = '**bold** answer'
+  const { markdown } = renderAssistantPanel(text)
+  const fallback = expandElement(markdown)
+  assert.equal(fallback.type, 'div')
+  assert.equal(fallback.props.className, 'sc-md')
 })
 
 test('bundle also materializes when the primitives seed module is present', () => {

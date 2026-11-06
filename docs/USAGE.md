@@ -232,8 +232,10 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - Messages: user bubbles with timestamps; assistant Markdown streamed token by token while
   the turn runs (reasoning folded, tool calls folded with their arguments and results);
   running/thinking indicator when no live text is visible yet; optimistic pending messages;
-  error banner. Markdown uses the shell's renderer when available and a built-in fallback
-  otherwise.
+  error banner. Markdown uses the shell's renderer (GFM tables, code fences with localized
+  copy/wrap controls, footnotes) and only falls back to a reduced built-in renderer when the
+  shell does not export `MarkdownText`; the fallback covers headings, lists, fences,
+  quotes and simple tables only, with raw HTML shown as literal text.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
