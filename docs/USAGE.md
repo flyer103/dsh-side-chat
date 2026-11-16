@@ -59,8 +59,8 @@ is needed. Use a pinned commit when you need reproducibility:
 
 ```bash
 cd /path/to/dsh-side-chat
-npm pack                       # writes flyer103-dsh-side-chat-0.7.1.tgz
-dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.7.1.tgz"
+npm pack                       # writes flyer103-dsh-side-chat-0.8.0.tgz
+dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.8.0.tgz"
 ```
 
 An `https:` tarball URL is accepted the same way.
