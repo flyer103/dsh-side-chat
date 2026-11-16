@@ -239,6 +239,8 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
+- Pasting an image into the composer attaches it to the next message (see *Pasted
+  images* below).
 - The message list follows the newest message while you stay at the bottom; scrolling up
   stops the auto-follow.
 - Several side chats can run at once: the guide card opens a new tab on every click, and
@@ -344,7 +346,42 @@ reads nothing and sends no content.
 - A profile without a file-reference provider (the shipped web stack has one) shows no menu;
   typing `@...` still sends the text unchanged.
 - Only files and folders are completed in this version. `@session` references, `/` commands
-  and skills, attachments, and drag-and-drop are not part of the side-chat composer yet.
+  and skills, and drag-and-drop are not part of the side-chat composer yet. Pasted images
+  are supported separately (see below).
+
+## Pasted images
+
+The side-chat composer accepts images from the clipboard. Paste a screenshot or a copied
+image file into the composer (`Ctrl+V` / `Cmd+V`) and it is attached to the next message:
+a thumbnail of the image (the picture itself, `object-fit: cover`, 64px) appears in a strip
+above the textarea with a `×` badge that removes it again. The preview is drawn at paste
+time into a 96px canvas and kept as a small JPEG data URL, so the strip never holds the
+original megabytes; when the browser cannot draw one, the strip falls back to the pasted
+bytes. Type your question and send — the image reaches the model together
+with the text, exactly as in the main composer. Several images can be pending at once.
+
+- A message needs text. Pasting an image does not enable the send button on its own:
+  describe what to do with the image ("what is wrong in this screenshot?"), then send.
+- Pasting text is untouched: with no image on the clipboard the composer behaves exactly
+  as before. A clipboard that carries both text and an image contributes the image only.
+- Accepted formats are PNG, JPEG, WebP and GIF (the formats DSH's attachment store
+  admits). Other image formats and non-image files are skipped with a short error strip
+  under the transcript.
+- Limits: at most **8 images** per message, **8 MB** per image and **16 MB** in total
+  (decoded size, measured before upload). An image above a limit is skipped with the same
+  kind of error strip while the accepted images stay attached.
+- Images are stored by DSH's attachment service before the message is queued, so the
+  conversation itself carries durable references rather than base64. If the profile has
+  no attachment service, image prompts are refused with a localized error and nothing is
+  sent; text prompts keep working.
+- After sending, the user bubble shows the picture itself, exactly like the main
+  composer: the panel asks the host's `attachment` route for the bytes of an image that
+  this side session already carries, turns them into a blob URL and caches it for the
+  tab's lifetime. Until the bytes arrive — or when the profile has no attachment service —
+  the bubble keeps a compact **Image** chip instead.
+- Pending images belong to one tab, like the draft: they are not shared with other
+  side-chat tabs, they survive switching tabs, and a failed send puts them back next to
+  the restored draft.
 
 ## Localization
 
@@ -415,8 +452,9 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
   plugin launches, the pre-existing host routes answer (including the SSE route's JSON
   fallback), and the client bundle is served. The stream frame contract is covered by the
   host/client unit tests and an in-process end-to-end check over a real HTTP server. The
-  `@file` route added since that run is covered by host-route unit tests rather than a
-  real-process check.
+  `@file` route and the pasted-image path added since that run are covered by host-route
+  and client-bundle unit tests rather than a real-process check; pasting itself has not
+  been smoke-tested in a live GUI.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -540,9 +578,20 @@ is about a dependency, not this plugin.
   shipped web stack does) complete workspace paths; without it the menu stays hidden and
   `@` text is sent unchanged. An `unavailable` answer is remembered for that tab, so a
   transient provider failure hides the menu until the tab is reopened.
-- **Only file and folder references are completed.** `@session` references, `/` commands and
-  skills, attachments, and drag-and-drop are not implemented in the side-chat composer; they
-  belong to later phases.
+- **Only file and folder references are completed.** `@session` references, `/` commands,
+  skills and drag-and-drop are not implemented in the side-chat composer; they belong to
+  later phases. Pasted images are supported (see *Pasted images*).
+- **Transcript pictures arrive one request at a time.** A committed message that carried
+  images renders the picture once the host has served its bytes; a very old tab that is
+  scrolled back may briefly show the chip while that request is in flight. Serving the stored
+  attachment bytes — previews, dimensions, click-to-open — is out of scope for this
+  version, so you cannot re-open or verify a pasted image from the transcript; describing
+  the content in text remains useful.
+- **Image prompts need the attachment service and a text caption.** A profile without
+  `ctx.attachments` refuses image prompts (`attachments-unavailable`), and a message with
+  images but no text is not sent — the model needs a text prompt next to the image. The
+  accepted formats are exactly PNG, JPEG, WebP and GIF; screenshots that paste as another
+  format are skipped with a localized error.
 - **P1b items are designed but not implemented:** model picker for the side session,
   side-session history across a GUI restart, approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
@@ -565,8 +614,8 @@ is about a dependency, not this plugin.
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes including the SSE stream and the read-only `references` lookup, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, `@` file-reference completion and chips, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream and the read-only `references` lookup, `prompt` image validation + attachment admission, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, pasted-image chips + base64 conversion, `@` file-reference completion and chips, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |

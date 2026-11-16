@@ -21,7 +21,8 @@ never share imports — only these routes.
 | path | request | response |
 |---|---|---|
 | `/side-chat/api/create` | `{ sourceId, instanceKey? }` | `{ ok: true, sessionId, inheritedEventCount }` \| `{ ok: false, code, message }` |
-| `/side-chat/api/prompt` | `{ sessionId, text }` | `{ ok: true }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/prompt` | `{ sessionId, text, images?: [{ mediaType, data }] }` | `{ ok: true }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/attachment` | `{ sessionId, attachmentId }` | `{ ok: true, mediaType, bytes, data }` \| `{ ok: false, code, message }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
 | `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement }], lastError }` \| `{ ok: false, code }` |
@@ -62,7 +63,44 @@ guessing. A later own `request/context` entry (for example after a model switch)
 precedence over the baseline.
 
 Error codes: `unknown-source`, `not-found`, `empty-prompt`, `create-failed`,
-`prompt-failed`, `dispose-failed`, `bad-request`, `unavailable`, `internal`.
+`prompt-failed`, `dispose-failed`, `bad-request`, `unavailable`, `internal`,
+`attachments-unavailable`, `image-rejected`.
+
+### Pasted images (`prompt.images`)
+
+`prompt` accepts an optional `images` array next to `text`. Each member is
+`{ mediaType, data }`: `data` is canonical base64 **without** a `data:` prefix and
+`mediaType` is one of `image/png`, `image/jpeg`, `image/webp`, `image/gif` (DSH's
+`ImageMediaType` vocabulary — the only formats the attachment store admits). The
+field is additive: a prompt without images keeps the old `{ sessionId, text }` body
+and the old one-text-part followup.
+
+- **Limits.** At most 8 images per message, 8 MiB per image and 16 MiB per message
+  (decoded bytes, not base64 length). These are the plugin's own policy, deliberately
+  below DSH's deployment limits (20 images, 50 MiB each) because one side-chat message
+  is billed with the whole inherited context on top. The whole `images` field is
+  validated — array shape, member shape, media type, canonical base64, per-image and
+  total bytes — before anything is admitted; any violation answers `bad-request` with a
+  message and queues nothing.
+- **Body cap.** Only this route raises the request-body cap (24 MiB) so a legal image
+  batch fits; every other JSON route keeps 1 MiB. Both caps are hard bounds.
+- **Admission.** Accepted uploads go through the optional `attachments` service:
+  `ctx.get('attachments')?.admitPromptContent([{ type: 'text', text }, { type: 'image',
+  data, mediaType }, …])`. The text part is always first and the images follow in
+  upload order. The returned admitted parts (durable `attachment` references, never the
+  bytes) become the followup `content`. A missing service answers
+  `attachments-unavailable`; a service refusal or a malformed answer answers
+  `image-rejected` (the service message rides along as `message`). Neither case throws
+  and neither queues a message. `attachments` is **not** part of `inject`, so a profile
+  without the service still loads the plugin and only refuses image prompts.
+- **Text stays required.** A prompt whose `text` is blank answers `empty-prompt` even
+  when images are attached, so the admitted parts always start with a non-empty text
+  block.
+- **Projection.** After admission the committed `user/message` carries `text` plus one
+  `image` block per upload (`{ type: 'image', attachment: { attachmentId, mediaType,
+  bytes, width, height } }`). The client folds these into a per-row `images` **count**
+  and renders one localized chip per block; attachment bytes are never sent to the
+  client and no thumbnail is served (see USAGE limitations).
 
 `create` is idempotent per identity: the opaque `instanceKey` when a non-empty one is sent,
 otherwise the legacy identity `source:<sourceId>`. A repeated call for the same identity
@@ -188,6 +226,33 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress.
+- Pasted images: `paste` on the composer collects `clipboardData.files` (falling back to
+  `items` with `kind: 'file'`) members whose type starts with `image/`, converts each
+  through `Blob.arrayBuffer()` (or `FileReader` without it) into canonical base64
+  without the `data:` prefix, and stores `{ id, mediaType, data, bytes }` in the tab's
+  own runtime record. A text-only paste is never prevented, so ordinary clipboard text
+  keeps its native behavior; a paste with at least one image is consumed
+  (`preventDefault`) and its images are added. Unsupported types, unreadable blobs,
+  oversize images and the count/byte caps skip that one file and set a localized error
+  (`image-unsupported`, `image-unreadable`, `image-too-large`, `image-too-many`) instead
+  of dropping the accepted images. Pending images render as cards in a
+  `.sc-image-strip` at the top of the composer card, above the textarea and below the
+  `@` menu, each holding an `img.sc-image-thumb` preview and a remove button that calls
+  the runtime. The preview is a client-side 96px canvas downscale kept as a JPEG data URL
+  (`thumbnail` on the pending record); without one the strip renders the original
+  `data:` URL, and neither form reaches the host or the transcript. When no image is
+  pending the strip does not exist; when no image is pending
+  the strip does not exist, so the composer keeps its `[menu, textarea, actions]`
+  shape. Sending posts `images: [{ mediaType, data }]` with the prompt, clears the
+  pending set optimistically and restores it on failure together with the draft —
+  under the same rule as the draft, so a message the user retyped meanwhile does not
+  inherit stale images.
+- Committed user bubbles render each image block as `img.sc-bubble-image` once the tab
+  has fetched its bytes from `/side-chat/api/attachment`, and as an inert localized
+  `sc-image-chip` until then (inside `.sc-bubble-images`), after the reference-chipped
+  text; the row carries `{ attachmentId, mediaType, width, height }` references, never
+  bytes, and the fetched blob URL is cached per tab and revoked when the tab goes away —
+  out of scope.
 - Assistant bodies render through the shell's `MarkdownText` (GFM: tables, task lists, code
   fences, footnotes, KaTeX; raw HTML stays literal text). The seed module exports it as a
   `React.memo` component, so detection accepts a component object (`$$typeof`), not only a
@@ -290,6 +355,14 @@ Performance & usage detailed/compact preference.
   pending-message state, context and steering tags, the usage dock, and error text keyed by
   host error code. The `@` menu adds `reference.menu` (listbox aria), `reference.loading` and
   `reference.empty` (status rows).
+- Pasted images add `image.pending` (strip aria label), `image.chip` (the chip label,
+  used both in the pending strip and in committed bubbles) and `image.remove` (remove
+  control label). Client-side paste failures use the codes `image-unsupported`,
+  `image-unreadable`, `image-too-large` and `image-too-many`; host prompt-image
+  failures use `bad-request`, `attachments-unavailable` and `image-rejected`. Each maps
+  to `error.imageUnsupported`, `error.imageUnreadable`, `error.imageTooLarge`,
+  `error.imageTooMany`, `error.badRequest`, `error.attachmentsUnavailable` and
+  `error.imageRejected` in the same namespace.
 - Dock keys, in the same namespace: `dock.tokens` (compact total), `dock.cacheHit`
   (percentage), `dock.contextAria` (accessible percentage), `dock.contextTitle` (approximate
   `~used / window`), `dock.usageTitle` (exact bucket counts), `dock.usageTitleWithWrite`

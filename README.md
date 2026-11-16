@@ -46,6 +46,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - **Inherits the agent** — same working directory, preset composition, tools, skills, model routing, sandbox mode and approval policy.
 - **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
 - **References files with `@`** — typing `@` in the side-chat composer opens a workspace path menu and inserts the same `@path` mention the main composer writes; the pick is text only, so the model reads the file with its normal tools. Directory picks keep the menu open to descend, and sent user bubbles show file/folder references as chips.
+- **Pastes images** — paste an image into the side-chat composer and it is sent with the next message: pending images show as small chips above the textarea and a `×` removes one, while sent messages keep a compact **Image** marker. Accepted formats, limits and the missing transcript previews are covered in [USAGE](docs/USAGE.md).
 - **Isolates the transcript** — side-chat turns never appear in the main conversation, the session list, or the subagent catalog.
 - **Streams the reply** — assistant text, reasoning and tool calls render token by token from a live event stream while the turn runs; when the transport cannot stream, the tab falls back to polling.
 - **Shows its own usage** — a slim dock under the composer (the same spot as DSH's main composer dock) shows this side chat's total tokens, cache-hit percentage, and a small context-occupancy ring + percentage. Hover for the exact uncached-input, cache-read and output counts (plus a cache-write count when the provider reports one) and the approximate `~used / window` pair. The dock starts hidden until the side chat has a usage sample, and it resets with each new side session.
@@ -53,7 +54,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 
 ## Compatibility
 
-- DSH `0.2.1-rc.2` (Desktop profile, Web GUI) — the tested target. This release was verified against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the plugin launches, the host routes answer (including the SSE route's JSON fallback), and the client bundle is served. The `@file` route added since that run is covered by host-route unit tests rather than a real-process check.
+- DSH `0.2.1-rc.2` (Desktop profile, Web GUI) — the tested target. This release was verified against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the plugin launches, the host routes answer (including the SSE route's JSON fallback), and the client bundle is served. The `@file` route and the pasted-image path added since that run are covered by host-route and client-bundle unit tests rather than a real-process check; pasting itself has not been smoke-tested in a live GUI.
 - No `engines.dsh` and no DSH peer dependency are declared, so DSH does not version-gate installation. That is separate from the tested version: newer DSH releases are untested.
 - Web platform only (`dsh.client.platform: web`); no CLI/TUI surface.
 - Node.js `>= 22`; the plugin itself is dependency-free ESM with no `@deepseek-ai/*` imports.
@@ -64,7 +65,8 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 - Approval prompts are not shown inside the side-chat tab: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
 - A closed tab cannot be restored: reopening the guide card or pressing **New side chat** starts a new side chat, whose agent is created on the next message.
 - P1b, designed but not implemented: model picker, surviving a GUI restart, approval rendering in the tab.
-- `@` completion depends on the host file-reference provider and only completes files and folders: `@session` references, `/` commands and skills, attachments and drag-and-drop are not part of the side-chat composer yet.
+- `@` completion depends on the host file-reference provider and only completes files and folders: `@session` references, `/` commands, skills and drag-and-drop are not part of the side-chat composer yet.
+- A pasted image previews itself in the composer with an object URL, the same way the main composer does, and the transcript shows the sent picture too: the tab fetches the bytes of images its own session carries through the host and caches them as blob URLs. Without an attachment service both fall back to a compact localized chip. Image prompts still need a text caption.
 - The inherited context is a snapshot taken when that side chat is created; later main-session turns are not pushed into an existing side chat, and each side chat keeps its own snapshot.
 - Token streaming rides on a streamable `fetch` response. If the page transport buffers the response (detected by a missing first frame), the tab falls back to snapshot polling: the running indicator returns and the reply still appears while it grows, at poll granularity.
 - Each side chat's first request is roughly as large as the parent's next request (it carries the inherited history), so N concurrent side chats multiply that first-request cost.
