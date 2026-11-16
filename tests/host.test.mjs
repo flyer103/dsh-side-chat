@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,7 +11,10 @@ import {
   completedTurnPrefix,
   isSystemNoise,
   LiveAttemptState,
+  PROMPT_IMAGE_LIMITS,
+  PROMPT_REQUEST_BODY_BYTES,
   projectQueue,
+  promptImagesOf,
   recentMainContext,
   referenceCandidates,
   requestContextWindow,
@@ -544,6 +548,245 @@ test('prompt queues an identified user message and reports prompt failures', asy
   assert.equal(failed.body.ok, false)
   assert.equal(failed.body.code, 'prompt-failed')
   assert.equal(failed.body.message, 'inbox closed')
+})
+
+// --- pasted images (prompt `images`) --------------------------------------
+
+/** A real 1x1 PNG: admission only checks base64 shape, so this is a stand-in upload. */
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/**
+ * Fake `attachments` service: records every admitted part list and answers
+ * durable image references in upload order, like `AttachmentStore.admitPromptContent`.
+ */
+function makeAttachments(options = {}) {
+  const calls = []
+  return {
+    calls,
+    async admitPromptContent(parts) {
+      calls.push(parts)
+      if (options.failure !== undefined) throw options.failure
+      if (options.result !== undefined) return options.result
+      let index = 0
+      return parts.map((part) => {
+        if (part.type === 'text') return { type: 'text', text: part.text }
+        index += 1
+        return {
+          type: 'image',
+          attachment: {
+            attachmentId: `att-${index}`,
+            mediaType: part.mediaType,
+            bytes: 70,
+            width: 1,
+            height: 1,
+          },
+        }
+      })
+    },
+  }
+}
+
+function imageArgs() {
+  return [{ mediaType: 'image/png', data: PNG_1PX }]
+}
+
+test('prompt admits images through the attachments service and follows up with the admitted parts', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const prompted = await post(runtime, 'prompt', { sessionId, text: 'look at this', images: imageArgs() })
+  assert.deepEqual(prompted.body, { ok: true })
+  assert.equal(attachments.calls.length, 1)
+  assert.deepEqual(attachments.calls[0], [
+    { type: 'text', text: 'look at this' },
+    { type: 'image', mediaType: 'image/png', data: PNG_1PX },
+  ])
+  const message = runtime.handles[0].agent.followups[0]
+  assert.equal(message.role, 'user')
+  assert.deepEqual(message.source, { kind: 'user' })
+  assert.equal(message.content.length, 2)
+  assert.deepEqual(message.content[0], { type: 'text', text: 'look at this' })
+  assert.equal(message.content[1].type, 'image')
+  assert.equal(message.content[1].attachment.attachmentId, 'att-1')
+  assert.equal(message.content[1].attachment.mediaType, 'image/png')
+  assert.equal('data' in message.content[1], false, 'the message carries the reference, not the bytes')
+
+  // A text-only prompt keeps the old behavior and never touches the service.
+  const plain = await post(runtime, 'prompt', { sessionId, text: 'no image' })
+  assert.deepEqual(plain.body, { ok: true })
+  assert.equal(attachments.calls.length, 1, 'a prompt without images performs no admission')
+  assert.deepEqual(runtime.handles[0].agent.followups[1].content, [{ type: 'text', text: 'no image' }])
+})
+
+test('prompt rejects malformed and oversize image payloads before admitting anything', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const notArray = await post(runtime, 'prompt', { sessionId, text: 'x', images: 'nope' })
+  assert.deepEqual(notArray.body, { ok: false, code: 'bad-request', message: 'images must be an array' })
+
+  const many = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: Array.from({ length: PROMPT_IMAGE_LIMITS.maxImages + 1 }, () => ({ mediaType: 'image/png', data: PNG_1PX })),
+  })
+  assert.equal(many.body.code, 'bad-request')
+  assert.match(many.body.message, /at most 8 images/)
+
+  const wrongType = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: [{ mediaType: 'text/plain', data: PNG_1PX }],
+  })
+  assert.equal(wrongType.body.code, 'bad-request')
+  assert.match(wrongType.body.message, /unsupported image media type/)
+
+  const prefixed = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: [{ mediaType: 'image/png', data: `data:image/png;base64,${PNG_1PX}` }],
+  })
+  assert.equal(prefixed.body.code, 'bad-request')
+  assert.equal(attachments.calls.length, 0, 'a refused batch starts no admission')
+  assert.equal(runtime.handles[0].agent.followups.length, 0, 'a refused batch is never queued')
+})
+
+test('promptImagesOf enforces the count, media-type and byte limits', () => {
+  assert.deepEqual(promptImagesOf(undefined), [])
+  assert.deepEqual(promptImagesOf(null), [])
+  assert.throws(() => promptImagesOf({}), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([null]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: '' }]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: 'AAAAA' }]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/svg+xml', data: 'AAAA' }]), { code: 'bad-request' })
+
+  const ok = promptImagesOf(imageArgs())
+  assert.equal(ok.length, 1)
+  assert.equal(ok[0].mediaType, 'image/png')
+  assert.equal(ok[0].bytes, 70)
+
+  // Per-image cap: one base64 quantum above the limit is refused by length alone.
+  const oversize = 'A'.repeat(Math.ceil(PROMPT_IMAGE_LIMITS.maxImageBytes / 3) * 4 + 4)
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: oversize }]), { code: 'bad-request' })
+
+  // Total cap: three uploads under the per-image cap still exceed the batch budget.
+  const chunk = 'A'.repeat(Math.ceil((PROMPT_IMAGE_LIMITS.maxImageBytes * 0.75) / 3) * 4)
+  assert.throws(
+    () => promptImagesOf([
+      { mediaType: 'image/png', data: chunk },
+      { mediaType: 'image/png', data: chunk },
+      { mediaType: 'image/png', data: chunk },
+    ]),
+    /total limit/,
+  )
+})
+
+test('prompt answers attachments-unavailable and image-rejected instead of throwing', async () => {
+  const unavailable = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(unavailable.ctx)
+  const unavailableId = (await post(unavailable, 'create', { sourceId: 'main-1' })).body.sessionId
+  const refused = await post(unavailable, 'prompt', { sessionId: unavailableId, text: 'x', images: imageArgs() })
+  assert.equal(refused.body.ok, false)
+  assert.equal(refused.body.code, 'attachments-unavailable')
+  assert.equal(unavailable.handles[0].agent.followups.length, 0)
+
+  const rejecting = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments: makeAttachments({ failure: new Error('Image batch exceeds the configured image-count limit.') }) },
+  })
+  apply(rejecting.ctx)
+  const rejectingId = (await post(rejecting, 'create', { sourceId: 'main-1' })).body.sessionId
+  const rejected = await post(rejecting, 'prompt', { sessionId: rejectingId, text: 'x', images: imageArgs() })
+  assert.deepEqual(rejected.body, {
+    ok: false,
+    code: 'image-rejected',
+    message: 'Image batch exceeds the configured image-count limit.',
+  })
+  assert.equal(rejecting.handles[0].agent.followups.length, 0)
+  assert.ok(rejecting.warnings.some((line) => line.includes('image admission failed')), 'the contained failure is logged')
+
+  const empty = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments: makeAttachments({ result: [] }) },
+  })
+  apply(empty.ctx)
+  const emptyId = (await post(empty, 'create', { sourceId: 'main-1' })).body.sessionId
+  const noParts = await post(empty, 'prompt', { sessionId: emptyId, text: 'x', images: imageArgs() })
+  assert.equal(noParts.body.code, 'image-rejected')
+  assert.match(noParts.body.message, /no admitted content/)
+  assert.equal(empty.handles[0].agent.followups.length, 0)
+})
+
+test('only the prompt route accepts a request body above the default cap', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const longText = 'x'.repeat(1024 * 1024 + 128)
+  const accepted = await post(runtime, 'prompt', { sessionId, text: longText })
+  assert.deepEqual(accepted.body, { ok: true })
+  assert.equal(runtime.handles[0].agent.followups[0].content[0].text.length, longText.length)
+  assert.ok(PROMPT_REQUEST_BODY_BYTES > 1024 * 1024, 'the prompt cap is raised')
+  assert.ok(PROMPT_REQUEST_BODY_BYTES < 64 * 1024 * 1024, 'and stays bounded')
+
+  const capped = routeHandler(() => ({ ok: true }), undefined, { maxBodyBytes: 64 })
+  const over = await invokeHandler(capped, JSON.stringify({ text: 'x'.repeat(128) }))
+  const overBody = JSON.parse(over.rawBody)
+  assert.equal(overBody.ok, false)
+  assert.equal(overBody.code, 'internal')
+  assert.match(overBody.message, /exceeds the size limit/)
+})
+
+test('a real HTTP server forwards an image prompt above the old 1 MiB body cap', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+  const route = runtime.routes.get(`${ROUTE_PREFIX}prompt`)
+  assert.ok(route !== undefined, 'route prompt is registered')
+
+  const server = createServer((req, res) => {
+    route.handler(req, res).catch(() => res.destroy())
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const { port } = server.address()
+    // 1.5 MiB of base64 image bytes: a legal upload that the default cap rejects.
+    const bytes = Math.floor(1024 * 1024 * 1.5)
+    const data = Buffer.alloc(bytes, 7).toString('base64')
+    const body = JSON.stringify({ sessionId, text: 'big shot', images: [{ mediaType: 'image/png', data }] })
+    assert.ok(body.length > 1024 * 1024, 'the request body exceeds the default cap')
+    const response = await fetch(`http://127.0.0.1:${port}${ROUTE_PREFIX}prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+    const payload = await response.json()
+    assert.deepEqual(payload, { ok: true })
+    const message = runtime.handles[0].agent.followups[0]
+    assert.equal(message.content.length, 2)
+    assert.equal(message.content[1].attachment.attachmentId, 'att-1')
+    assert.equal(attachments.calls[0][1].data, data, 'the upload reaches the service intact')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })
 
 test('cancel stops the running turn through the agent handle', async () => {

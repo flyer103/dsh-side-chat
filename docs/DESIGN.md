@@ -222,6 +222,77 @@ there is no persistence, schema or prompt change to migrate.
   answerer inside the panel).
 - Side-session history across a GUI restart (today: in-memory handles only).
 
+## P1c — pasted images (this phase)
+
+The composer accepts images pasted from the clipboard and sends them with the next
+message, using the harness attachment service the main composer already uses.
+
+### In scope
+
+- **Clipboard capture**: `paste` on the side-chat textarea collects `clipboardData`
+  members that are images (`files` first, `items` as fallback), converts each with
+  `Blob.arrayBuffer()` (FileReader fallback) into canonical base64 without the `data:`
+  prefix, and stores it in the tab's runtime record. A text-only paste is not interfered
+  with at all; no image path ever prevents the browser's native text insertion.
+- **Pending chips**: a `.sc-image-strip` inside the composer card, between the `@` menu
+  and the textarea, renders one chip per pending image with a remove control. The strip
+  is absent when nothing is pending, so the composer keeps its existing child order.
+- **Send**: the prompt body carries `images: [{ mediaType, data }]`; a successful send
+  clears the pending set, a failed one restores it together with the draft. The message
+  body shape without images is unchanged.
+- **Host admission**: `prompt` validates the array (count, per-image and total bytes,
+  media type, canonical base64) before touching the service, then admits the batch via
+  `ctx.get('attachments')?.admitPromptContent([text, ...images])` and follows up with the
+  admitted parts. Missing service → `attachments-unavailable`, refusal → `image-rejected`;
+  neither throws. Only this route's body cap is raised, and it stays a hard bound.
+- **Projection**: a committed user message with image blocks renders one localized chip
+  per block (count only, never bytes).
+
+### Out of scope
+
+- Serving attachment bytes to the panel: no thumbnails, no previews, no click-to-open.
+- Drag and drop, file attachments (non-image), PDFs and `@session` references.
+- Any change to how the main conversation composer uploads or renders attachments.
+
+### Acceptance
+
+- Pasting a screenshot and sending a caption reaches the model as image content; the
+  attachment store has stored it and the followup carries durable references.
+- Pasting text still behaves exactly as before; the `@` menu, Enter/Shift+Enter, IME and
+  two-tab paths are unchanged.
+- A second image, a removal, and a failed send all leave the pending set in the state the
+  user would expect (restored, not lost).
+- Oversize / unsupported / excess pastes are reported locally without dropping the
+  accepted images; a host refusal is reported as a localized error strip.
+- Existing tests, `npm run check` and `npm test` stay green.
+
+### Verification (P1c)
+
+Host and client unit tests cover the route (validation, admission, failure codes,
+body cap), the per-tab pending set, the send/restore path and the projection. The
+browser paste gesture itself — a real `ClipboardEvent` carrying real image bytes,
+the chip strip, the remove control and the send round-trip in a live GUI — needs a
+manual smoke in a running DSH and has not been run for this change.
+
+### Adversarial notes (P1c)
+
+- **No attachment service**: the plugin does not `inject` it, so a profile without it
+  still loads; the route answers `attachments-unavailable` and the client shows a
+  localized error instead of a silent no-op.
+- **Body bomb**: images are bounded three ways (count, per-image, total) and the route's
+  body cap is 24 MiB; an oversized body is refused before JSON parsing completes.
+- **Canonical base64**: the plugin only shape-checks; the attachment service re-validates
+  and decodes, so a non-canonical payload surfaces as `image-rejected` rather than being
+  repaired silently.
+- **Failed send**: the pending images and the draft are restored only when the tab is
+  still open and the draft was not retyped meanwhile, mirroring the existing draft rule.
+- **Two tabs**: pending images live in the per-tab runtime record, so a paste in one tab
+  never leaks into another.
+- **Clipboard with text and an image**: the image wins and the text insertion is
+  suppressed for that paste; documented in USAGE.
+- **Tab closed mid-read**: the async conversion checks that the runtime record still
+  exists before it appends anything.
+
 ## Non-goals
 
 - Merging side-chat content back into the main transcript.

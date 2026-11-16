@@ -2482,6 +2482,7 @@ function panelState(overrides = {}) {
     pollError: null,
     sending: false,
     draft: '',
+    images: [],
     pending: [],
     live: null,
     metrics: null,
@@ -3131,3 +3132,287 @@ test('reference copy is localized and the panel stylesheet ships the menu and ch
   assert.equal(t('reference.loading'), 'Searching files…')
   assert.equal(t('reference.empty'), 'No matching files')
 })
+
+// ---- P1c pasted images ----
+
+/** A `File`-shaped stub: unique arrayBuffer bytes, no DOM FileReader needed. */
+function pastedImage(type, bytes) {
+  const array = bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(bytes)
+  return {
+    type,
+    size: array.length,
+    async arrayBuffer() {
+      return array.buffer.slice(array.byteOffset, array.byteOffset + array.byteLength)
+    }
+  }
+}
+
+/** One committed user message carrying `imageCount` image blocks after its text. */
+function userImageEntry(seq, text, imageCount) {
+  const content = [{ type: 'text', text }]
+  for (let index = 0; index < imageCount; index += 1) {
+    content.push({
+      type: 'image',
+      attachment: { attachmentId: `att-${index}`, mediaType: 'image/png', bytes: 70, width: 1, height: 1 }
+    })
+  }
+  return {
+    seq,
+    type: 'user/message',
+    time: 1700000000000 + seq * 1000,
+    surfaceOp: 'append',
+    data: { id: `user-${seq}`, source: { kind: 'user' }, content }
+  }
+}
+
+test('pastedImageFiles reads image files and items but leaves a text paste alone', () => {
+  const { exports } = loadBundle()
+  assert.deepEqual(exports.pastedImageFiles(null), [])
+  assert.deepEqual(exports.pastedImageFiles({}), [])
+  assert.deepEqual(exports.pastedImageFiles({ files: [{ type: 'text/plain' }] }), [], 'a text paste yields no image')
+
+  const png = { type: 'image/png' }
+  const jpeg = { type: 'IMAGE/JPEG' }
+  assert.deepEqual(exports.pastedImageFiles({ files: [png, { type: 'text/plain' }, jpeg] }), [png, jpeg])
+
+  const webp = { type: 'image/webp' }
+  const items = [
+    { kind: 'string', type: 'text/plain', getAsFile: () => ({ type: 'text/plain' }) },
+    { kind: 'file', type: 'image/webp', getAsFile: () => webp }
+  ]
+  assert.deepEqual(exports.pastedImageFiles({ items }), [webp], 'the items path covers browsers without files')
+
+  const many = Array.from({ length: exports.PASTE_IMAGE_MAX_COUNT + 4 }, () => ({ type: 'image/png' }))
+  assert.equal(exports.pastedImageFiles({ files: many }).length, exports.PASTE_IMAGE_MAX_COUNT, 'the paste is bounded')
+})
+
+test('readImageData converts a pasted blob to canonical base64 and rejects other types', async () => {
+  const { exports } = loadBundle()
+  const data = await exports.readImageData(pastedImage('image/png', [0, 1, 2, 253, 254, 255]))
+  assert.equal(data.mediaType, 'image/png')
+  assert.equal(data.data, Buffer.from([0, 1, 2, 253, 254, 255]).toString('base64'))
+  assert.equal(data.data.includes('data:'), false, 'the data URL prefix never reaches the wire')
+  assert.equal(data.bytes, 6)
+
+  await assert.rejects(
+    () => exports.readImageData(pastedImage('image/svg+xml', [1])),
+    (error) => error.code === 'image-unsupported'
+  )
+  await assert.rejects(
+    () => exports.readImageData(null),
+    (error) => error.code === 'image-unsupported'
+  )
+  await assert.rejects(
+    () => exports.readImageData({ type: 'image/png' }),
+    (error) => error.code === 'image-unreadable'
+  )
+})
+
+test('a pasted image joins its own tab pending set and can be removed', async () => {
+  const { runtime } = createRuntimeWith(createFetchStub({}))
+  runtime.open('main-1')
+  runtime.open('main-2')
+  assert.equal(await runtime.addPastedImages('main-1', []), 0)
+  assert.equal(await runtime.addPastedImages('main-1', [pastedImage('image/png', [1, 2, 3])]), 1)
+
+  const state = runtime.getState('main-1')
+  assert.equal(state.images.length, 1)
+  assert.equal(state.images[0].mediaType, 'image/png')
+  assert.equal(state.images[0].data, 'AQID')
+  assert.equal(state.images[0].bytes, 3)
+  assert.equal(typeof state.images[0].id, 'string')
+  assert.equal(runtime.getState('main-2').images.length, 0, 'pending images are per tab')
+
+  runtime.removeImage('main-1', 'missing-id')
+  assert.equal(runtime.getState('main-1').images.length, 1, 'an unknown id changes nothing')
+  runtime.removeImage('main-1', state.images[0].id)
+  assert.equal(runtime.getState('main-1').images.length, 0)
+})
+
+test('an unsupported, oversize or excess paste reports a localized failure and keeps the accepted images', async () => {
+  const { exports } = loadBundle()
+  const { runtime } = createRuntimeWith(createFetchStub({}))
+  runtime.open('main-1')
+
+  const added = await runtime.addPastedImages('main-1', [
+    pastedImage('image/tiff', [1, 2, 3]),
+    pastedImage('image/png', [1, 2, 3])
+  ])
+  assert.equal(added, 1, 'the accepted image still lands')
+  assert.deepEqual(runtime.getState('main-1').error, { code: 'image-unsupported', message: '', params: {} })
+
+  await runtime.addPastedImages('main-1', [pastedImage('image/png', new Uint8Array(exports.PASTE_IMAGE_MAX_BYTES + 3))])
+  assert.equal(runtime.getState('main-1').images.length, 1, 'an oversize image is skipped')
+  assert.equal(runtime.getState('main-1').error.code, 'image-too-large')
+
+  const many = Array.from({ length: exports.PASTE_IMAGE_MAX_COUNT + 1 }, () => pastedImage('image/png', [1]))
+  const rest = await runtime.addPastedImages('main-1', many)
+  assert.equal(rest, exports.PASTE_IMAGE_MAX_COUNT - 1, 'the pending set stops at the count cap')
+  assert.equal(runtime.getState('main-1').images.length, exports.PASTE_IMAGE_MAX_COUNT)
+  assert.equal(runtime.getState('main-1').error.code, 'image-too-many')
+})
+
+test('send posts the pending images once, clears them and omits the field when empty', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [] }
+  })
+  const { runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.addPastedImages('main-1', [pastedImage('image/png', [1, 2, 3])])
+  await runtime.send('main-1', 'look at this')
+
+  const promptCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}prompt`)
+  assert.equal(promptCalls.length, 1)
+  assert.deepEqual(promptCalls[0].body, {
+    sessionId: 'side-1',
+    text: 'look at this',
+    images: [{ mediaType: 'image/png', data: 'AQID' }]
+  })
+  assert.equal(runtime.getState('main-1').images.length, 0, 'a successful send clears the pending images')
+
+  await runtime.send('main-1', 'plain text')
+  const second = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}prompt`).at(-1)
+  assert.equal('images' in second.body, false, 'a message without images keeps the old body shape')
+  await runtime.close('main-1')
+})
+
+test('a refused prompt restores the pending images together with the draft', async () => {
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: false, code: 'image-rejected', message: 'image batch refused' }
+  })
+  const { runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.addPastedImages('main-1', [pastedImage('image/png', [1, 2, 3])])
+  const before = runtime.getState('main-1').images[0]
+  await runtime.send('main-1', 'look at this')
+
+  const state = runtime.getState('main-1')
+  assert.equal(state.sessionId, 'side-1')
+  assert.deepEqual(state.error, { code: 'image-rejected', message: 'image batch refused', params: {} })
+  assert.equal(state.draft, 'look at this')
+  assert.equal(state.pending.length, 0)
+  assert.equal(state.images.length, 1)
+  assert.deepEqual(state.images[0], before, 'the same pending image comes back')
+  await runtime.close('main-1')
+})
+
+test('a committed user message with image blocks renders one localized chip per image', () => {
+  const { exports, bodyRegistration } = panelRenderer()
+  const nodes = exports.foldEntries([userImageEntry(1, 'see these', 2)], 0)
+  assert.equal(nodes.length, 1)
+  assert.equal(nodes[0].kind, 'user')
+  assert.equal(nodes[0].text, 'see these')
+  assert.equal(nodes[0].images, 2, 'the fold keeps an image count, never bytes')
+
+  const imageOnly = exports.foldEntries([userImageEntry(2, '', 1)], 0)
+  assert.equal(imageOnly.length, 1, 'an image-only message is not dropped')
+  assert.equal(imageOnly[0].text, '')
+  assert.equal(imageOnly[0].images, 1)
+
+  const props = bodyRegistration.options.inject('session-1')
+  const tree = renderPanel(bodyRegistration, props, panelState({ nodes }), props.t)
+  const body = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-body')
+  const userRow = body.children[0][0]
+  const bubble = findElement(userRow.type(userRow.props), (element) => element.props !== undefined && element.props.className === 'sc-bubble')
+  const chips = []
+  collectElements(bubble, (element) => {
+    if (element.props !== undefined && element.props.className === 'sc-image-chip') chips.push(element)
+  })
+  assert.equal(chips.length, 2)
+  assert.deepEqual(chips.map((chip) => chip.children), [['图片'], ['图片']])
+  for (const chip of chips) {
+    assert.equal(chip.props.dangerouslySetInnerHTML, undefined, 'a chip never injects HTML')
+    assert.equal(chip.props.onClick, undefined, 'a committed chip is inert')
+  }
+  assert.equal(bubble.children[0].filter((part) => typeof part === 'string').join(''), 'see these', 'the text stays')
+})
+
+test('the panel shows pending images above the textarea and removes them through the runtime', async () => {
+  const { bodyRegistration } = panelRenderer()
+  const calls = []
+  const state = panelState({
+    draft: 'with a picture',
+    images: [{ id: 'img-1', mediaType: 'image/png', data: 'AQID', bytes: 3 }]
+  })
+  const runtime = panelRuntime(state, calls)
+  runtime.removeImage = (id, imageId) => calls.push(['remove', id, imageId])
+  runtime.addPastedImages = (id, files) => {
+    calls.push(['paste', id, files.length])
+    return Promise.resolve(files.length)
+  }
+  const props = bodyRegistration.options.inject('session-1')
+  const bodyElement = bodyRegistration.component({
+    runtime,
+    sessionId: 'main-1',
+    t: props.t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const tree = bodyElement.type(bodyElement.props)
+  const composer = composerOf(tree)
+  assert.equal(composer.children.length, 4)
+  assert.equal(composer.children[0], null, 'no reference menu is open')
+  const strip = composer.children[1]
+  assert.equal(strip.props.className, 'sc-image-strip', 'the strip sits above the textarea')
+  assert.equal(strip.props['aria-label'], '待发送图片')
+  const chip = strip.children[0][0]
+  assert.equal(chip.props.className, 'sc-image-chip')
+  const thumb = chip.children[0]
+  assert.equal(thumb.type, 'img', 'the pending image previews itself')
+  assert.equal(thumb.props.className, 'sc-image-thumb')
+  assert.equal(thumb.props.src, 'data:image/png;base64,AQID', 'without a downscaled copy the original bytes render')
+  assert.equal(thumb.props.alt, '图片')
+  const textarea = composer.children[2]
+  assert.equal(textarea.props.className, 'sc-textarea')
+
+  chip.children[1].props.onClick()
+  assert.deepEqual(calls.at(-1), ['remove', 'main-1', 'img-1'])
+
+  let prevented = 0
+  const textPaste = textarea.props.onPaste({
+    clipboardData: { files: [{ type: 'text/plain' }] },
+    preventDefault: () => { prevented += 1 }
+  })
+  assert.equal(textPaste, undefined)
+  assert.equal(prevented, 0, 'a text paste is never prevented')
+  assert.equal(calls.filter((call) => call[0] === 'paste').length, 0)
+
+  const imagePaste = textarea.props.onPaste({
+    clipboardData: { files: [{ type: 'image/png' }] },
+    preventDefault: () => { prevented += 1 }
+  })
+  assert.equal(prevented, 1, 'an image paste is consumed by the composer')
+  await imagePaste
+  assert.deepEqual(calls.at(-1), ['paste', 'main-1', 1])
+})
+
+test('image copy is localized and the stylesheet ships the strip and chip styles', () => {
+  const { exports } = loadBundle()
+  const keys = [
+    'image.pending', 'image.chip', 'image.remove',
+    'error.badRequest', 'error.attachmentsUnavailable', 'error.imageRejected',
+    'error.imageUnsupported', 'error.imageTooLarge', 'error.imageTooMany', 'error.imageUnreadable'
+  ]
+  for (const key of keys) {
+    assert.equal(typeof exports.ZH_DICT[key], 'string', `zh.${key} exists`)
+    assert.equal(typeof exports.EN_DICT[key], 'string', `en.${key} exists`)
+    assert.notEqual(exports.ZH_DICT[key].trim(), '')
+    assert.notEqual(exports.EN_DICT[key].trim(), '')
+  }
+  assert.equal(exports.PASTE_IMAGE_MAX_COUNT, 8)
+  assert.equal(exports.PASTE_IMAGE_MAX_BYTES, 8 * 1024 * 1024)
+  assert.equal(exports.PASTE_IMAGE_TOTAL_BYTES, 16 * 1024 * 1024)
+  assert.equal(exports.PASTE_IMAGE_MEDIA_TYPES.has('image/gif'), true)
+  for (const selector of ['.sc-image-strip', '.sc-image-chip', '.sc-image-thumb', '.sc-image-chip-remove', '.sc-bubble-images']) {
+    assert.ok(exports.PANEL_CSS.includes(selector), `${selector} must ship in the panel stylesheet`)
+  }
+  assert.deepEqual(
+    exports.formatError((key) => key, { code: 'image-rejected', message: 'nope', params: {} }),
+    { title: 'error.imageRejected', detail: 'nope' }
+  )
+})
+
