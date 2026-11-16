@@ -1,6 +1,8 @@
+import { Buffer } from 'node:buffer'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,13 +12,17 @@ import {
   completedTurnPrefix,
   isSystemNoise,
   LiveAttemptState,
+  PROMPT_IMAGE_LIMITS,
+  PROMPT_REQUEST_BODY_BYTES,
   projectQueue,
+  promptImagesOf,
   recentMainContext,
   referenceCandidates,
   requestContextWindow,
   routeHandler,
   sideConversationBoundaryPrompt,
   sideDeveloperInstructions,
+  sideSessionId,
   snapshotEntries,
 } from '../lib/index.js'
 
@@ -64,12 +70,23 @@ const DEFAULT_SERVICES = {
   },
 }
 
-function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, followupFailure, disposeFailure } = {}) {
+function makeRuntime({
+  parents = [],
+  services = {},
+  createDelayMs = 0,
+  createFailure,
+  followupFailure,
+  disposeFailure,
+  resumeFailure,
+  resumeEvents = [],
+  resumeInheritedEventCount = 0,
+} = {}) {
   const routes = new Map()
   const effects = []
   const listeners = new Map()
   const warnings = []
   const created = []
+  const resumed = []
   const handles = []
   const disposed = []
   const locateCalls = []
@@ -79,8 +96,8 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
 
   const resolvedServices = { ...DEFAULT_SERVICES, ...services }
 
-  async function defaultCreate(options) {
-    created.push(options)
+  async function defaultCreate(options, { resumed = false } = {}) {
+    if (!resumed) created.push(options)
     if (createFailure !== undefined) throw createFailure
     const seedEvents = Array.isArray(options.seed) ? structuredClone(options.seed) : []
     const session = {
@@ -165,6 +182,19 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
         if (createDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, createDelayMs))
         return defaultCreate(options)
       },
+      resume: async (options) => {
+        if (createDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, createDelayMs))
+        resumed.push(options)
+        if (resumeFailure !== undefined) throw resumeFailure
+        return defaultCreate({
+          sessionId: options.resumeSessionId,
+          agentOptions: options.agentOptions,
+          setup: options.setup,
+          meta: {},
+          seed: resumeEvents,
+          inheritedEventCount: resumeInheritedEventCount,
+        }, { resumed: true })
+      },
     },
     get: (serviceName) => resolvedServices[serviceName],
     on(eventName, callback) {
@@ -191,6 +221,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
     listeners,
     warnings,
     created,
+    resumed,
     handles,
     disposed,
     locateCalls,
@@ -371,6 +402,7 @@ test('apply registers every contract route', () => {
   const runtime = makeRuntime()
   apply(runtime.ctx)
   assert.deepEqual([...runtime.routes.keys()].sort(), [
+    `${ROUTE_PREFIX}attachment`,
     `${ROUTE_PREFIX}cancel`,
     `${ROUTE_PREFIX}close`,
     `${ROUTE_PREFIX}create`,
@@ -378,6 +410,7 @@ test('apply registers every contract route', () => {
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
     `${ROUTE_PREFIX}references`,
+    `${ROUTE_PREFIX}restore`,
     `${ROUTE_PREFIX}snapshot`,
     `${ROUTE_PREFIX}status`,
   ])
@@ -546,6 +579,245 @@ test('prompt queues an identified user message and reports prompt failures', asy
   assert.equal(failed.body.message, 'inbox closed')
 })
 
+// --- pasted images (prompt `images`) --------------------------------------
+
+/** A real 1x1 PNG: admission only checks base64 shape, so this is a stand-in upload. */
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/**
+ * Fake `attachments` service: records every admitted part list and answers
+ * durable image references in upload order, like `AttachmentStore.admitPromptContent`.
+ */
+function makeAttachments(options = {}) {
+  const calls = []
+  return {
+    calls,
+    async admitPromptContent(parts) {
+      calls.push(parts)
+      if (options.failure !== undefined) throw options.failure
+      if (options.result !== undefined) return options.result
+      let index = 0
+      return parts.map((part) => {
+        if (part.type === 'text') return { type: 'text', text: part.text }
+        index += 1
+        return {
+          type: 'image',
+          attachment: {
+            attachmentId: `att-${index}`,
+            mediaType: part.mediaType,
+            bytes: 70,
+            width: 1,
+            height: 1,
+          },
+        }
+      })
+    },
+  }
+}
+
+function imageArgs() {
+  return [{ mediaType: 'image/png', data: PNG_1PX }]
+}
+
+test('prompt admits images through the attachments service and follows up with the admitted parts', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const prompted = await post(runtime, 'prompt', { sessionId, text: 'look at this', images: imageArgs() })
+  assert.deepEqual(prompted.body, { ok: true })
+  assert.equal(attachments.calls.length, 1)
+  assert.deepEqual(attachments.calls[0], [
+    { type: 'text', text: 'look at this' },
+    { type: 'image', mediaType: 'image/png', data: PNG_1PX },
+  ])
+  const message = runtime.handles[0].agent.followups[0]
+  assert.equal(message.role, 'user')
+  assert.deepEqual(message.source, { kind: 'user' })
+  assert.equal(message.content.length, 2)
+  assert.deepEqual(message.content[0], { type: 'text', text: 'look at this' })
+  assert.equal(message.content[1].type, 'image')
+  assert.equal(message.content[1].attachment.attachmentId, 'att-1')
+  assert.equal(message.content[1].attachment.mediaType, 'image/png')
+  assert.equal('data' in message.content[1], false, 'the message carries the reference, not the bytes')
+
+  // A text-only prompt keeps the old behavior and never touches the service.
+  const plain = await post(runtime, 'prompt', { sessionId, text: 'no image' })
+  assert.deepEqual(plain.body, { ok: true })
+  assert.equal(attachments.calls.length, 1, 'a prompt without images performs no admission')
+  assert.deepEqual(runtime.handles[0].agent.followups[1].content, [{ type: 'text', text: 'no image' }])
+})
+
+test('prompt rejects malformed and oversize image payloads before admitting anything', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const notArray = await post(runtime, 'prompt', { sessionId, text: 'x', images: 'nope' })
+  assert.deepEqual(notArray.body, { ok: false, code: 'bad-request', message: 'images must be an array' })
+
+  const many = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: Array.from({ length: PROMPT_IMAGE_LIMITS.maxImages + 1 }, () => ({ mediaType: 'image/png', data: PNG_1PX })),
+  })
+  assert.equal(many.body.code, 'bad-request')
+  assert.match(many.body.message, /at most 8 images/)
+
+  const wrongType = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: [{ mediaType: 'text/plain', data: PNG_1PX }],
+  })
+  assert.equal(wrongType.body.code, 'bad-request')
+  assert.match(wrongType.body.message, /unsupported image media type/)
+
+  const prefixed = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'x',
+    images: [{ mediaType: 'image/png', data: `data:image/png;base64,${PNG_1PX}` }],
+  })
+  assert.equal(prefixed.body.code, 'bad-request')
+  assert.equal(attachments.calls.length, 0, 'a refused batch starts no admission')
+  assert.equal(runtime.handles[0].agent.followups.length, 0, 'a refused batch is never queued')
+})
+
+test('promptImagesOf enforces the count, media-type and byte limits', () => {
+  assert.deepEqual(promptImagesOf(undefined), [])
+  assert.deepEqual(promptImagesOf(null), [])
+  assert.throws(() => promptImagesOf({}), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([null]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: '' }]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: 'AAAAA' }]), { code: 'bad-request' })
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/svg+xml', data: 'AAAA' }]), { code: 'bad-request' })
+
+  const ok = promptImagesOf(imageArgs())
+  assert.equal(ok.length, 1)
+  assert.equal(ok[0].mediaType, 'image/png')
+  assert.equal(ok[0].bytes, 70)
+
+  // Per-image cap: one base64 quantum above the limit is refused by length alone.
+  const oversize = 'A'.repeat(Math.ceil(PROMPT_IMAGE_LIMITS.maxImageBytes / 3) * 4 + 4)
+  assert.throws(() => promptImagesOf([{ mediaType: 'image/png', data: oversize }]), { code: 'bad-request' })
+
+  // Total cap: three uploads under the per-image cap still exceed the batch budget.
+  const chunk = 'A'.repeat(Math.ceil((PROMPT_IMAGE_LIMITS.maxImageBytes * 0.75) / 3) * 4)
+  assert.throws(
+    () => promptImagesOf([
+      { mediaType: 'image/png', data: chunk },
+      { mediaType: 'image/png', data: chunk },
+      { mediaType: 'image/png', data: chunk },
+    ]),
+    /total limit/,
+  )
+})
+
+test('prompt answers attachments-unavailable and image-rejected instead of throwing', async () => {
+  const unavailable = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(unavailable.ctx)
+  const unavailableId = (await post(unavailable, 'create', { sourceId: 'main-1' })).body.sessionId
+  const refused = await post(unavailable, 'prompt', { sessionId: unavailableId, text: 'x', images: imageArgs() })
+  assert.equal(refused.body.ok, false)
+  assert.equal(refused.body.code, 'attachments-unavailable')
+  assert.equal(unavailable.handles[0].agent.followups.length, 0)
+
+  const rejecting = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments: makeAttachments({ failure: new Error('Image batch exceeds the configured image-count limit.') }) },
+  })
+  apply(rejecting.ctx)
+  const rejectingId = (await post(rejecting, 'create', { sourceId: 'main-1' })).body.sessionId
+  const rejected = await post(rejecting, 'prompt', { sessionId: rejectingId, text: 'x', images: imageArgs() })
+  assert.deepEqual(rejected.body, {
+    ok: false,
+    code: 'image-rejected',
+    message: 'Image batch exceeds the configured image-count limit.',
+  })
+  assert.equal(rejecting.handles[0].agent.followups.length, 0)
+  assert.ok(rejecting.warnings.some((line) => line.includes('image admission failed')), 'the contained failure is logged')
+
+  const empty = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments: makeAttachments({ result: [] }) },
+  })
+  apply(empty.ctx)
+  const emptyId = (await post(empty, 'create', { sourceId: 'main-1' })).body.sessionId
+  const noParts = await post(empty, 'prompt', { sessionId: emptyId, text: 'x', images: imageArgs() })
+  assert.equal(noParts.body.code, 'image-rejected')
+  assert.match(noParts.body.message, /no admitted content/)
+  assert.equal(empty.handles[0].agent.followups.length, 0)
+})
+
+test('only the prompt route accepts a request body above the default cap', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+
+  const longText = 'x'.repeat(1024 * 1024 + 128)
+  const accepted = await post(runtime, 'prompt', { sessionId, text: longText })
+  assert.deepEqual(accepted.body, { ok: true })
+  assert.equal(runtime.handles[0].agent.followups[0].content[0].text.length, longText.length)
+  assert.ok(PROMPT_REQUEST_BODY_BYTES > 1024 * 1024, 'the prompt cap is raised')
+  assert.ok(PROMPT_REQUEST_BODY_BYTES < 64 * 1024 * 1024, 'and stays bounded')
+
+  const capped = routeHandler(() => ({ ok: true }), undefined, { maxBodyBytes: 64 })
+  const over = await invokeHandler(capped, JSON.stringify({ text: 'x'.repeat(128) }))
+  const overBody = JSON.parse(over.rawBody)
+  assert.equal(overBody.ok, false)
+  assert.equal(overBody.code, 'internal')
+  assert.match(overBody.message, /exceeds the size limit/)
+})
+
+test('a real HTTP server forwards an image prompt above the old 1 MiB body cap', async () => {
+  const attachments = makeAttachments()
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { attachments },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+  const route = runtime.routes.get(`${ROUTE_PREFIX}prompt`)
+  assert.ok(route !== undefined, 'route prompt is registered')
+
+  const server = createServer((req, res) => {
+    route.handler(req, res).catch(() => res.destroy())
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const { port } = server.address()
+    // 1.5 MiB of base64 image bytes: a legal upload that the default cap rejects.
+    const bytes = Math.floor(1024 * 1024 * 1.5)
+    const data = Buffer.alloc(bytes, 7).toString('base64')
+    const body = JSON.stringify({ sessionId, text: 'big shot', images: [{ mediaType: 'image/png', data }] })
+    assert.ok(body.length > 1024 * 1024, 'the request body exceeds the default cap')
+    const response = await fetch(`http://127.0.0.1:${port}${ROUTE_PREFIX}prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+    const payload = await response.json()
+    assert.deepEqual(payload, { ok: true })
+    const message = runtime.handles[0].agent.followups[0]
+    assert.equal(message.content.length, 2)
+    assert.equal(message.content[1].attachment.attachmentId, 'att-1')
+    assert.equal(attachments.calls[0][1].data, data, 'the upload reaches the service intact')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('cancel stops the running turn through the agent handle', async () => {
   const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
   apply(runtime.ctx)
@@ -680,6 +952,108 @@ test('concurrent creates with the same instance key dedupe to one side session',
   assert.equal(runtime.created.length, 1)
 })
 
+test('attachment serves one image of this session and refuses anything else', async () => {
+  const events = [
+    ev(0, 'user/message', userMsg('u1', 'main task')),
+    ev(1, 'user/message', {
+      id: 'u3',
+      role: 'user',
+      content: [{ type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }],
+      source: { kind: 'user' },
+    }),
+    ev(2, 'turn/start', { turn: 1 }),
+    ev(3, 'assistant/message', { turn: 1, step: 1, message: assistantMsg('a1', 'done') }),
+    ev(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+  ]
+  const reads = []
+  const runtime = makeRuntime({
+    parents: [makeParent({ events })],
+    services: {
+      attachments: {
+        async readImage(ref) {
+          reads.push(ref.attachmentId)
+          return { ref, data: new Uint8Array([1, 2, 3]) }
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+  const created = await post(runtime, 'create', { sourceId: 'main-1' })
+  const sessionId = created.body.sessionId
+
+  const served = await post(runtime, 'attachment', { sessionId, attachmentId: 'att-1' })
+  assert.equal(served.body.ok, true)
+  assert.equal(served.body.mediaType, 'image/png')
+  assert.equal(served.body.bytes, 3)
+  assert.equal(served.body.data, Buffer.from([1, 2, 3]).toString('base64'))
+  assert.deepEqual(reads, ['att-1'])
+
+  const foreign = await post(runtime, 'attachment', { sessionId, attachmentId: 'att-other' })
+  assert.deepEqual(foreign.body, { ok: false, code: 'not-found', message: 'unknown image "att-other"' })
+  const missing = await post(runtime, 'attachment', { sessionId: 'side-chat-missing', attachmentId: 'att-1' })
+  assert.equal(missing.body.code, 'not-found')
+})
+
+test('attachment reports an unavailable store without throwing', async () => {
+  const events = [
+    ev(0, 'user/message', userMsg('u1', 'main task')),
+    ev(1, 'user/message', {
+      id: 'u3',
+      role: 'user',
+      content: [{ type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }],
+      source: { kind: 'user' },
+    }),
+    ev(2, 'turn/start', { turn: 1 }),
+    ev(3, 'assistant/message', { turn: 1, step: 1, message: assistantMsg('a1', 'done') }),
+    ev(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+  ]
+  const runtime = makeRuntime({ parents: [makeParent({ events })] })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+  const served = await post(runtime, 'attachment', { sessionId, attachmentId: 'att-1' })
+  assert.deepEqual(served.body, {
+    ok: false,
+    code: 'attachments-unavailable',
+    message: 'the attachments service is unavailable in this profile',
+  })
+})
+
+test('an idle side session stops accepting prompts but keeps its history', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: {
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ({ events: BASE_EVENTS, eventState: 'detached' }),
+          close: async () => {},
+        }),
+      },
+    },
+  })
+  apply(runtime.ctx)
+  const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
+  const entry = [...runtime.ctx.sideChatService.entries.values()][0]
+  assert.equal(typeof entry.lastActivity, 'number')
+
+  // Age the conversation past the TTL instead of waiting a day.
+  entry.lastActivity = Date.now() - 25 * 60 * 60 * 1000
+  const expired = await post(runtime, 'prompt', { sessionId, text: 'still there?' })
+  assert.equal(expired.body.ok, false)
+  assert.equal(expired.body.code, 'expired')
+  assert.equal(runtime.handles[0].agent.followups.length, 0, 'nothing reaches the agent')
+
+  // The live agent is gone, and the transcript is served read-only from disk.
+  assert.equal(runtime.ctx.sideChatService.entries.size, 0, 'an expired conversation holds no agent')
+  const snapshot = await post(runtime, 'snapshot', { sessionId })
+  assert.equal(snapshot.body.ok, true)
+  assert.equal(snapshot.body.readOnly, true)
+  assert.equal(snapshot.body.status, 'expired')
+
+  // A retired conversation is not resurrected in place; continuing means a new one.
+  const again = await post(runtime, 'prompt', { sessionId, text: 'hello again' })
+  assert.equal(again.body.code, 'not-found')
+})
+
 test('closing one instance leaves the other alive and allows the key a new session', async () => {
   const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
   apply(runtime.ctx)
@@ -696,7 +1070,9 @@ test('closing one instance leaves the other alive and allows the key a new sessi
 
   const recreated = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
   assert.equal(recreated.body.ok, true)
-  assert.notEqual(recreated.body.sessionId, first.body.sessionId)
+  // The id is derived from the instance key, so the same tab reuses it; the
+  // previous session is gone (its stored log was removed by close above).
+  assert.equal(recreated.body.sessionId, first.body.sessionId)
   assert.notEqual(recreated.body.sessionId, second.body.sessionId)
   assert.equal(runtime.created.length, 3)
   const listed = (await post(runtime, 'list', {})).body.sessions
@@ -704,6 +1080,95 @@ test('closing one instance leaves the other alive and allows the key a new sessi
     listed.map((entry) => entry.sessionId).sort(),
     [second.body.sessionId, recreated.body.sessionId].sort(),
   )
+})
+
+test('sideSessionId is deterministic per identity and never the parent id', () => {
+  assert.equal(sideSessionId('main-1#tab-a'), sideSessionId('main-1#tab-a'))
+  assert.notEqual(sideSessionId('main-1#tab-a'), sideSessionId('main-1#tab-b'))
+  assert.match(sideSessionId('main-1#tab-a'), /^side-chat-[0-9a-f]{32}$/)
+})
+
+test('restore reports no session for an unknown tab and creates nothing', async () => {
+  let statCalls = 0
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: {
+      sessionPersistence: {
+        stat() {
+          statCalls += 1
+          throw new Error('not found')
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+
+  const restored = await post(runtime, 'restore', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.deepEqual(restored.body, { ok: true, sessionId: null })
+  assert.equal(statCalls, 1)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 0)
+})
+
+test('restore adopts the stored side session of a restarted host', async () => {
+  const parent = makeParent({ events: BASE_EVENTS })
+  const runtime = makeRuntime({
+    parents: [parent],
+    resumeEvents: BASE_EVENTS,
+    resumeInheritedEventCount: 4,
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const restored = await post(runtime, 'restore', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(restored.body.ok, true)
+  assert.equal(restored.body.sessionId, sideSessionId('main-1#tab-a'))
+  assert.equal(restored.body.inheritedEventCount, 4)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+  assert.equal(runtime.resumed[0].resumeSessionId, sideSessionId('main-1#tab-a'))
+
+  // A later create reattaches instead of forking a second session.
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.sessionId, restored.body.sessionId)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+})
+
+test('create resumes a stored side session instead of forking again', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    resumeEvents: BASE_EVENTS,
+    resumeInheritedEventCount: 4,
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.ok, true)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+  const setup = runtime.resumed[0].setup
+  assert.equal(typeof setup, 'function')
+  // Resuming must not re-append the boundary message or the inherited policies.
+  assert.equal(runtime.handles[0].agent.session.appends.length, 0)
+})
+
+test('a stored session that cannot be resumed falls back to a fresh session', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    resumeFailure: new Error('format v5 is not supported'),
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.ok, true)
+  assert.equal(runtime.resumed.length, 1)
+  assert.equal(runtime.created.length, 1)
+  assert.notEqual(runtime.created[0].sessionId, sideSessionId('main-1#tab-a'))
+  assert.match(created.body.sessionId, /^side-chat-/)
+  assert.match(runtime.warnings.join('\n'), /starting a fresh side session/)
 })
 
 test('list reports both instances of a parent with their source id', async () => {
@@ -763,7 +1228,10 @@ test('close removes the handle first, disposes, then deletes the persisted artif
 
     const recreated = await post(runtime, 'create', { sourceId: 'main-1' })
     assert.equal(recreated.body.ok, true)
-    assert.notEqual(recreated.body.sessionId, sessionId)
+    // The stored log is gone, so the identity derives the same id for a session
+    // that starts from scratch again.
+    assert.equal(recreated.body.sessionId, sessionId)
+    assert.equal(runtime.created.length, 2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
