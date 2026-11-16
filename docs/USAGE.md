@@ -183,19 +183,34 @@ permission rows. It also inherits:
   catalog either.
 - One side session per side-chat tab. A parent session can hold several side-chat tabs in
   the same pane; each tab owns its own side session, persisted log, live stream and
-  status/draft state. Closing a tab ends only that side session — it cannot be reopened —
-  and the other side chats and the parent session are unaffected.
+  status/draft state. Closing a tab ends only that side session — its stored log is deleted
+  and it cannot be reopened — and the other side chats and the parent session are unaffected.
 - The side session owns its own persisted log on disk. The main session's log is untouched.
-- Host handles live in memory. A GUI or host restart loses every side session. A page reload
-  drops the client tab state; if the rebuilt tab reuses the same per-tab identity while the
-  host process is still running, `create` is idempotent per identity and reattaches to the
-  existing side session, otherwise the next message starts a new one (see Known
-  limitations).
+- A side session survives a GUI or host restart while its tab stays open: the tab's identity
+  derives the same session id, and a mounting tab probes `restore` to adopt the stored
+  session (and its transcript) before the next message. What destroys a side chat is closing
+  its tab (or deleting its stored log); closing the app no longer does. A page reload drops
+  the client tab state, but a rebuilt tab reuses the same per-tab identity and reattaches.
+- A stored session this build cannot resume (for example a log written by an incompatible
+  future format) is left untouched: the tab logs a warning and starts a fresh side session
+  under a new id, so it never wedges.
 - The tab does not attach to the session through the generic client `sessions` service: a
   parentless subagent-origin session is not addressable there. Its message sources are the
   host's live `/side-chat/api/events` stream and the read-only
   `/side-chat/api/snapshot` polling route; both answer only for sessions this plugin
   created and return `not-found` for anything else — the tab cannot read other sessions.
+
+## Idle expiry
+
+A side conversation left idle for more than **24 hours** stops accepting messages: `prompt`
+answers `expired`, the panel shows a localized reason, and the transcript stays readable
+(`snapshot`/`events` are unaffected). Activity means the last accepted prompt, so a side
+chat in use never expires. Expiry **retires the live agent**: the conversation keeps only its
+stored log, its transcript is served read-only from disk, the tab releases its cached picture
+URLs, and nothing of it stays in host memory. Continuing the work means a new side chat (or a
+normal session); a retired conversation is not resurrected in place. This bounds what resuming a stale context would cost and lets an
+abandoned log age out; continuing the work belongs in a new side chat or a normal session,
+because a side conversation is a scratch pad rather than a place to keep long-lived threads.
 
 ## Mutation semantics — the point of this plugin
 
@@ -239,6 +254,8 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
+- Pasting an image into the composer attaches it to the next message (see *Pasted
+  images* below).
 - The message list follows the newest message while you stay at the bottom; scrolling up
   stops the auto-follow.
 - Several side chats can run at once: the guide card opens a new tab on every click, and
@@ -344,7 +361,45 @@ reads nothing and sends no content.
 - A profile without a file-reference provider (the shipped web stack has one) shows no menu;
   typing `@...` still sends the text unchanged.
 - Only files and folders are completed in this version. `@session` references, `/` commands
-  and skills, attachments, and drag-and-drop are not part of the side-chat composer yet.
+  and skills, and drag-and-drop are not part of the side-chat composer yet. Pasted images
+  are supported separately (see below).
+
+## Pasted images
+
+The side-chat composer accepts images from the clipboard. Paste a screenshot or a copied
+image file into the composer (`Ctrl+V` / `Cmd+V`) and it is attached to the next message:
+a thumbnail of the image (the picture itself, `object-fit: cover`, 64px) appears in a strip
+above the textarea with a `×` badge that removes it again. The preview is drawn at paste
+time into a 96px canvas and kept as a small JPEG data URL, so the strip never holds the
+original megabytes; when the browser cannot draw one, the strip falls back to the pasted
+bytes. Type your question and send — the image reaches the model together
+with the text, exactly as in the main composer. Several images can be pending at once.
+
+- A message needs text. Pasting an image does not enable the send button on its own:
+  describe what to do with the image ("what is wrong in this screenshot?"), then send.
+- Pasting text is untouched: with no image on the clipboard the composer behaves exactly
+  as before. A clipboard that carries both text and an image contributes the image only.
+- Accepted formats are PNG, JPEG, WebP and GIF (the formats DSH's attachment store
+  admits). Other image formats and non-image files are skipped with a short error strip
+  under the transcript.
+- Limits: at most **8 images** per message, **8 MB** per image and **16 MB** in total
+  (decoded size, measured before upload). An image above a limit is skipped with the same
+  kind of error strip while the accepted images stay attached.
+- Images are stored by DSH's attachment service before the message is queued, so the
+  conversation itself carries durable references rather than base64. If the profile has
+  no attachment service, image prompts are refused with a localized error and nothing is
+  sent; text prompts keep working.
+- Hovering a sent image shows an open cursor; clicking it opens the picture full size in
+  a lightbox (Escape, the backdrop or the ✕ closes it and focus returns to the picture).
+  This mirrors the main composer's message images.
+- After sending, the user bubble shows the picture itself, exactly like the main
+  composer: the panel asks the host's `attachment` route for the bytes of an image that
+  this side session already carries, turns them into a blob URL and caches it for the
+  tab's lifetime. Until the bytes arrive — or when the profile has no attachment service —
+  the bubble keeps a compact **Image** chip instead.
+- Pending images belong to one tab, like the draft: they are not shared with other
+  side-chat tabs, they survive switching tabs, and a failed send puts them back next to
+  the restored draft.
 
 ## Localization
 
@@ -415,8 +470,9 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
   plugin launches, the pre-existing host routes answer (including the SSE route's JSON
   fallback), and the client bundle is served. The stream frame contract is covered by the
   host/client unit tests and an in-process end-to-end check over a real HTTP server. The
-  `@file` route added since that run is covered by host-route unit tests rather than a
-  real-process check.
+  `@file` route and the pasted-image path added since that run are covered by host-route
+  and client-bundle unit tests rather than a real-process check; pasting itself has not
+  been smoke-tested in a live GUI.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -443,8 +499,9 @@ node scripts/install.mjs --profile desktop --uninstall
 
 Then restart DSH. Rollback has no migration step: the dependency and the bundle row are the
 only installed state, and no main-session transcript, schema, or workspace file was
-modified by the plugin's installation. Side sessions are ephemeral by design, so there is
-no history to migrate. If you installed into a throwaway profile, delete
+modified by the plugin's installation. Side sessions live in their own stored logs (which
+`close` deletes and rollback leaves behind as ordinary orphaned session directories), so
+there is no history to migrate. If you installed into a throwaway profile, delete
 `~/.dsh/profiles/<name>` after removing the plugin.
 
 ## Troubleshooting
@@ -486,11 +543,12 @@ updates.
 
 **A refresh lost the side chat.**
 
-Tab state lives in memory and is not restored across a reload. If the rebuilt tab reuses the
-same per-tab identity while the host process is still running, its `create` reattaches to
-the existing side session (create is idempotent per instance key); otherwise you get a new
-side chat. After a GUI or host restart every side session is gone. Reopen the guide card or
-press the new-side-chat button; a new side chat is created on the next message.
+Draft text and scroll position live in memory and are not restored across a reload, but the
+side session itself is: the rebuilt tab reuses the same per-tab identity, and its mount probe
+adopts the stored session — before a restart the live handle is reused, after a restart the
+stored log is resumed. Reopen the tab (the right sidebar restores its tabs) and keep
+talking; a new side chat is only created when nothing is stored for that tab — for example
+after its tab was closed, which deletes the stored log.
 
 **Clicking the guide card starts another side chat instead of focusing the old one.**
 
@@ -523,8 +581,9 @@ is about a dependency, not this plugin.
 ## Known limitations
 
 - **Approval prompts are not surfaced in the side-chat tab.** See above.
-- **A closed tab cannot be restored.** Closing destroys only that side session; a GUI or host
-  restart also loses every side session. The other side chats are unaffected.
+- **A closed tab cannot be restored.** Closing its tab destroys only that side session and
+  deletes its stored log; a GUI or host restart keeps every side session whose tab still
+  exists. The other side chats are unaffected.
 - **Every side chat carries its own inherited context.** Its first request is about as large
   as the parent's next request, so N concurrent side chats multiply that cost.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
@@ -540,11 +599,22 @@ is about a dependency, not this plugin.
   shipped web stack does) complete workspace paths; without it the menu stays hidden and
   `@` text is sent unchanged. An `unavailable` answer is remembered for that tab, so a
   transient provider failure hides the menu until the tab is reopened.
-- **Only file and folder references are completed.** `@session` references, `/` commands and
-  skills, attachments, and drag-and-drop are not implemented in the side-chat composer; they
-  belong to later phases.
+- **Only file and folder references are completed.** `@session` references, `/` commands,
+  skills and drag-and-drop are not implemented in the side-chat composer; they belong to
+  later phases. Pasted images are supported (see *Pasted images*).
+- **Transcript pictures arrive one request at a time.** A committed message that carried
+  images renders the picture once the host has served its bytes; a very old tab that is
+  scrolled back may briefly show the chip while that request is in flight. Serving the stored
+  attachment bytes — previews, dimensions, click-to-open — is out of scope for this
+  version, so you cannot re-open or verify a pasted image from the transcript; describing
+  the content in text remains useful.
+- **Image prompts need the attachment service and a text caption.** A profile without
+  `ctx.attachments` refuses image prompts (`attachments-unavailable`), and a message with
+  images but no text is not sent — the model needs a text prompt next to the image. The
+  accepted formats are exactly PNG, JPEG, WebP and GIF; screenshots that paste as another
+  format are skipped with a localized error.
 - **P1b items are designed but not implemented:** model picker for the side session,
-  side-session history across a GUI restart, approval rendering in the tab.
+  approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
   side chat's own requests — including the inherited context its first request re-sends — and
   never the parent's earlier requests; context occupancy is the newest provider-reported
@@ -565,8 +635,8 @@ is about a dependency, not this plugin.
 
 | file | role |
 |---|---|
-| `lib/index.js` | host half: `webServer` routes including the SSE stream and the read-only `references` lookup, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
-| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, `@` file-reference completion and chips, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
+| `lib/index.js` | host half: `webServer` routes including the SSE stream and the read-only `references` lookup, `prompt` image validation + attachment admission, live assistant-attempt folding, fork seed + recent-context snapshot, boundary injection, per-identity (per-tab) side-session registry, the optional `contextWindow` on snapshot/`hello`, close/dispose |
+| `lib/client.js` | client half: right-Sidebar tab type + guide entry, one tab body per tab instance (SSE/poll message sources, streaming rendering, composer, pasted-image chips + base64 conversion, `@` file-reference completion and chips, bottom usage dock, RPC calls), numbered chips + the new-side-chat button, and the close handler |
 | `cordis.patch.yml` | bundle patch inserting the `dsh-side-chat` loader row |
 | `package.json` | `dsh.bundle.patch`, `dsh.client` (web platform), package identity, `node >= 22` |
 | `dsh.plugin.json` | community manifest metadata; DSH itself does not read this file (see the README) |
