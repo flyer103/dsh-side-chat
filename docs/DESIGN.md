@@ -16,7 +16,7 @@ Delta against the existing community plugins:
 | `Yur0918/dsh-sidepanel` | no (read-only persona side chat) | fork only | no |
 | **this plugin** | **yes — full tool chain in the same workspace** | **yes** | **yes** |
 
-## P0 (this phase)
+## P0 (shipped)
 
 1. **Entry**: the plugin registers a native tab type of the right Sidebar (`kind: side-chat`,
    `multiple: true`) plus a guide entry, so it is reached through the session header's "Open
@@ -72,7 +72,7 @@ Delta against the existing community plugins:
     cache-write segment when the provider reports it) and `~used / window`; there are no
     dialogs, turns, steps or tok/s, no new route, no extra polling, and no config option.
 
-## P1a — `@file` references (this phase)
+## P1a — `@file` references (shipped)
 
 The side-chat composer adopts the primary composer's file-reference flow: `@` opens a
 workspace path menu for the side chat's inherited working directory, and a pick inserts the
@@ -213,6 +213,244 @@ sketch below fixes the semantics for review.
 
 The route registration and menu rendering are additive. Reverting the slices removes them;
 there is no persistence, schema or prompt change to migrate.
+
+## P1a-2 — `@session` references (this phase)
+
+The primary composer's `@` menu searches workspace paths *and* sessions. Picking a session
+inserts the canonical `@[title](dsh-session:…)` mention, and DSH's mounted session-reference
+plugin turns that mention into a prepared, budgeted snapshot of the referenced session at
+`agent/pre-step`. The side-chat composer so far lists files only, so this slice makes the
+menu search sessions too and inserts the same canonical mention: the model-visible effect is
+the primary composer's, while the plugin still reads no file or session content itself.
+
+Runtime basis: DSH `0.2.2-rc.3` (the installed Desktop build). Verified in the loaded profile
+through Inspect: `ctx.get('sessionReferenceResolver')` exposes
+`listCandidates(agent, query, limit?, signal?)`, and the source installs the
+`agent/pre-step` listener that replaces canonical mentions with prepared context. The side
+agent is a normal `ctx.agents.create` agent whose user messages carry `source: { kind: 'user' }`,
+so the same pre-step preparation applies to it. The mention format
+(`@[label](dsh-session:<base64url(JSON.stringify(sessionId))>)`, with `\` and `]` escaped in
+the label) is replicated locally because the plugin imports no `@deepseek-ai/*` package; the
+installed `parseSessionReferenceText` was run against the generated spelling and round-trips
+the session id and escaped labels.
+
+### In scope
+
+1. **Route** — `POST /side-chat/api/references` gains `quoted?: boolean` and returns one
+   discriminated candidate list: file/directory rows as today plus session rows
+   `{ kind: 'session', sessionId, label, mention, location?, createdAt }`. File and session
+   lookups run in parallel against the addressed agent; a quoted query skips sessions (primary
+   parity); a missing or failing domain only removes its rows. `unavailable` is answered only
+   when neither domain is mounted, so the client keeps its one retry-free `unavailable` cache
+   meaningful.
+2. **Menu** — session rows render in a second group (`reference.sessions`) with the session
+   title and a `location · age` description; directory/file rows keep the first group
+   (`reference.files`). Up/Down still wrap over the flattened rows; group headers are not
+   options and take no index.
+3. **Insertion** — a session pick inserts the readable `@[title]` token at the caret and
+   closes the menu. A per-tab list records `{ token, mention }`; `send` expands each recorded
+   token to the canonical mention (first exact occurrence; duplicate picks consume successive
+   occurrences) and sends the result, so the prompt text is exactly what the primary inserts.
+   A token the user edited or deleted is skipped rather than mis-referenced.
+4. **History** — committed user messages parse canonical mentions into inert session chips
+   (label only, no click), alongside file/folder chips; pending rows render the same expanded
+   text so the chip appears without a flash.
+5. **Graceful absence** — no resolver: files only, no error. No file provider: sessions only.
+   Neither: today's `unavailable`.
+
+### Out of scope
+
+- Opening a referenced session in the sidebar, drill/breadcrumb parity, subagent section
+  headers, `/` commands and skills, generic (non-image) attachments.
+- Reading the referenced session's log in this plugin; preparation stays DSH's.
+- Persisting drafts or references across tab close/restart.
+
+### Contract sketch
+
+`CONTRACT.md` stays authoritative once this lands; the sketch fixes the semantics for review.
+
+| path | request | response |
+|---|---|---|
+| `/side-chat/api/references` | `{ sourceId?, sessionId?, query, quoted? }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' } \| { kind: 'session', sessionId, label, mention, location?: string \| null, createdAt }] }` \| `{ ok: false, code, message? }` |
+
+- `quoted === true` skips session discovery; files only.
+- Ordering: file/directory rows first, then sessions in resolver rank order (cwd affinity,
+  then resolver order).
+- `location` is omitted when the candidate shares the addressed agent's workspace, `null`
+  when it has no recorded cwd, otherwise the home-abbreviated cwd.
+- `unavailable` when both providers are absent, or when every attempted lookup failed; one
+  failed domain is logged and dropped.
+- A session row's `mention` is generated host-side from the resolver's session id and display
+  title; the client rejects a malformed mention instead of inserting it.
+
+### Editor flow
+
+- A session pick replaces `[token start, caret]` exactly like a file pick. The readable token
+  is `@[<escaped title>]`; `activeAtToken` treats a completed `@[…]` as inert so the menu does
+  not reopen on it.
+- Expansion happens in `send` only: the draft keeps the readable token, the pending row and
+  the wire text carry the canonical mention. A failed send keeps both the draft and the
+  recorded references.
+- Label escaping mirrors the primary: `\` and `]` are escaped in the readable token and in the
+  canonical mention; the host clamps control characters out of a mention label.
+
+### Acceptance
+
+1. Typing `@` plus a query lists files and sessions in two groups; `@"` lists files only.
+2. Picking a session inserts `@[Title]`; sending produces the canonical mention, DSH prepares
+   the referenced snapshot, and the committed bubble shows a session chip.
+3. A profile without `sessionReferenceResolver` lists files only, with no error.
+4. A malformed mention in a response is dropped, never inserted.
+5. Two tabs keep independent menus and reference lists.
+6. Levels: L1 host shaping/route and client parsing/menu/expansion; L2 real HTTP framing of the
+   combined route; L3 manual after a DSH restart for the actual pick and prepared context.
+
+### Adversarial notes (P1a-2)
+
+- **Resolver absent or degraded**: sessions are not offered; the file path is unaffected.
+- **Lookup race**: both lookups share one abort signal; a disconnected client aborts both and
+  receives no response.
+- **Mention injection**: the client only inserts a mention matching the canonical shape and
+  returned by the host; arbitrary typed text has no more authority than any prompt text.
+- **Editing the readable token**: expansion targets the exact token; an edited token sends
+  literal text (no reference) instead of the wrong reference.
+- **Preparation failure**: DSH terminates the turn after the message is accepted, exactly as in
+  the primary session; the tab surfaces the turn error through its existing status path, and
+  the draft was already consumed.
+- **Self reference**: the resolver excludes the addressed agent. Before the first message the
+  addressed agent is the parent, so the parent session is not offered (its context is already
+  inherited by the seed); after `create` it is.
+- **Two tabs**: menu and reference-list state live in the per-tab runtime record.
+
+### Delivery slices
+
+1. Host mention/candidate shaping + route + tests.
+2. Client candidates/menu/insertion/expansion + tests.
+3. History chips + locale/CSS + tests.
+4. Docs and manual smoke; a version bump is a separate release commit.
+
+### Rollback
+
+Additive. Reverting the route fields and client rows falls back to files-only completion; no
+persistence, schema or prompt change to migrate.
+
+## P1b-1 — image input (implemented, unreleased)
+
+DSH 0.2.2 already ships the whole image pipeline: the composer uploads bytes, the
+`attachments` store normalizes and persists them, the user message carries durable
+`ImageAttachmentRef` blocks, and the provider adapter resolves them into per-route request
+images. The side-chat composer is a hand-written `<textarea>` that only sends text, so this
+phase adds the composer/upload/serve triad and reuses `ctx.attachments` — it imports no
+`@deepseek-ai/*` package and keeps the hand-written bundle.
+
+Runtime basis: the installed DSH is **0.2.2-rc.3** (the local source checkout lags at
+0.2.1-rc.2). The host APIs below are present in the installed build and the attachment
+service contract was checked through Inspect; the image flow itself was implemented against
+0.2.2-rc.1 and is covered by unit tests, with no GUI run recorded:
+`ctx.attachments.saveImages` / `admitPromptContent` / `readImage` / `isAttachmentError`,
+`model.inputModalities`, and `agent.followup` with image content blocks
+(`ImageBlock = { type: 'image', attachment: ImageAttachmentRef }`,
+`ref = { attachmentId: 'sha256:<hex>', mediaType, width, height, bytes, name?, originalDimensions? }`).
+
+### In scope
+
+1. **Input channels** — paste (clipboard image), drag & drop (image files onto the composer
+   card), and a file-picker button (`accept="image/*"`, multiple). Insert order is preserved.
+2. **Per-image upload** — each file is uploaded as soon as it is added:
+   `POST /side-chat/api/attachment` with the raw bytes as the body and identity/mime/name in
+   the query; the host calls `ctx.attachments.saveImages([{ data, mediaType, name }])` and
+   returns the durable reference. Deployment limits and accepted media types belong to the
+   mounted attachment provider (defaults: PNG/JPEG/WebP/GIF, 50 MiB per source, 20 images and
+   200 MiB per message) — the plugin hardcodes none of them.
+3. **Composer rail** — 64 px thumbnails above the textarea with a remove control and the
+   states `uploading` / `ready` / `error`; a rejected file shows a localized reason and can be
+   retried or removed. Uploads never block typing, `@` completion, or `Enter`.
+4. **Send** — `prompt` gains an optional `attachments: [ImageAttachmentRef]`. Text may be
+   empty when attachments exist. The host re-admits the batch through
+   `ctx.attachments.admitPromptContent()` (count and aggregate-byte limits, canonical refs)
+   and `agent.followup`s a user message whose content is the text block (when non-empty)
+   followed by the image blocks in order. Vision gating mirrors the main session: when the
+   route's model reports `inputModalities` without `image`, the prompt is refused before the
+   append with reason `MODEL_DOES_NOT_SUPPORT_IMAGES`.
+5. **History** — committed `user/message` image blocks render as thumbnails inside the user
+   bubble; a click opens the full image; missing or corrupt objects render a failed
+   placeholder. `GET /side-chat/api/image` serves the stored bytes
+   (`ctx.attachments.readImage(ref)`) with the reference media type and immutable caching.
+6. **Queue projection** — image-only queued prompts are not dropped: queue rows gain an
+   additive `images` count and the client renders a localized "image" label.
+
+### Out of scope
+
+- Generic (non-image) file attachments, pasted paths/text, camera capture, image editing.
+- Deleting stored objects: DSH attachments are never garbage-collected, so a removed
+  thumbnail, an uploaded-but-unsent image, or a tab closed before sending leaves an
+  orphaned object. It is never referenced by a session log and is harmless.
+- Re-opening a closed tab's draft or its composer rail (drafts remain in-memory only).
+- Per-profile limits UI, upload progress percentages, and pausing uploads.
+
+### Contract sketch
+
+`CONTRACT.md` stays authoritative; this fixes the semantics for review.
+
+| path | request | response |
+|---|---|---|
+| `/side-chat/api/attachment` | raw image bytes; query `{ sourceId?, sessionId?, mime, name? }` | `{ ok: true, attachment }` \| `{ ok: false, code, message?, reason? }` |
+| `/side-chat/api/image` | `GET` query `{ sessionId, attachmentId, mediaType, width, height, bytes }` | image bytes (`Content-Type: <mediaType>`), 404 on failure |
+| `/side-chat/api/prompt` | `{ sessionId, text, attachments? }` | unchanged `{ ok: true }` \| `{ ok: false, code, message?, reason? }` |
+
+- The upload route accepts at most 50 MiB of raw body (provider limit plus one byte so the
+  provider can refuse it); the body is not JSON, so this route bypasses `routeHandler` and
+  owns its response. Identity: `sessionId` must name an owned side session; before the first
+  message the tab sends `sourceId` (a live parent) instead. Neither present → `bad-request`.
+- `attachments` entries are validated structurally (id `^sha256:[0-9a-f]{64}$`, media type in
+  the provider's accepted set, positive integers, bounded name). The read path re-verifies
+  digest, length and dimensions against the stored object, so a forged reference fails
+  closed instead of leaking bytes.
+- New error code `attachment-rejected` carries `reason` — the provider's stable
+  `AttachmentError.code` (`UNSUPPORTED_IMAGE_TYPE`, `IMAGE_TOO_LARGE`, `IMAGE_TOO_MANY_PIXELS`,
+  `TOO_MANY_IMAGES`, `IMAGES_TOO_LARGE`, `INVALID_IMAGE`, `IMAGE_TYPE_MISMATCH`, …) or
+  `MODEL_DOES_NOT_SUPPORT_IMAGES`. Unknown reasons fall back to the host message text.
+- The image route answers with `404` (no JSON envelope) because the consumer is `<img>`; the
+  client renders its failed placeholder for any non-200.
+
+### Acceptance
+
+1. Paste an image → a thumbnail appears immediately, settles `ready`, and typing continues
+   unaffected; a rejected file shows the reason and no message is sent.
+2. Drag an image over the composer → drop target hint; dropping inserts it. Dropping a
+   non-image file shows the "unsupported image" reason and stores nothing.
+3. The paperclip opens a multi-select image picker; picks appear in selection order.
+4. Remove works before send; sending image-only content is allowed; sending empty text with
+   no image is still rejected exactly as today.
+5. The committed bubble shows the thumbnails; clicking one opens the full image; a
+   deliberately deleted object renders the failed placeholder.
+6. With a text-only model the send is refused with a localized reason, and the draft and the
+   thumbnails are preserved.
+7. Two tabs keep independent rails; closing a tab discards its rail.
+8. A reattached tab (snapshot) renders earlier images in history, and `@` completion, IME
+   composition, and `Enter` semantics are unchanged.
+9. Verification levels: L1 unit (host + client) for every rule above; L2 in-process real HTTP
+   for upload framing, image serving and prompt refusal; L3 manual after a DSH restart for
+   the interactions a unit test cannot see.
+
+### Adversarial notes (P1b-1)
+
+- **Crash between upload and send**: the object is already durable and unreferenced; the
+  session log never mentions it. Recovery = user re-adds it; no state drifts.
+- **Crash mid-send**: `followup` is one call after admission; the message is either committed
+  whole or not at all. A retry re-sends the same refs; content-addressed storage makes that
+  idempotent, and the client's single in-flight send guard prevents duplicates.
+- **Ref forgery**: validation is structural only; the read path re-verifies digest, bytes and
+  dimensions, and the provider projects request images from the stored object.
+- **Provider absence**: no `ctx.attachments` (profile without the attachment bundle) → both
+  routes answer `unavailable`, the composer hides paste-to-upload affordances only after a
+  failed attempt and shows the reason; text-only sending is untouched.
+- **Read during unload/close**: `readImage` rejects or the route is gone; thumbnails fall back
+  to the failed placeholder; history rows stay rendered with the placeholder.
+- **Large batches**: the provider owns the 20-image / 200 MiB rule; the plugin lets it reject
+  and maps the reason, so limits never drift between plugin and deployment.
+- **Model route changes mid-tab**: the vision check runs per send on the agent's current
+  route, not on the route captured at creation.
 
 ## P1b (designed, not implemented)
 

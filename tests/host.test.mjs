@@ -1,13 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  abbreviateHomePath,
   apply,
   artifactDirectory,
   completedTurnPrefix,
+  imageAttachmentRef,
   isSystemNoise,
   LiveAttemptState,
   projectQueue,
@@ -15,6 +18,8 @@ import {
   referenceCandidates,
   requestContextWindow,
   routeHandler,
+  sessionReferenceCandidates,
+  sessionReferenceMention,
   sideConversationBoundaryPrompt,
   sideDeveloperInstructions,
   snapshotEntries,
@@ -123,6 +128,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
       id: options.sessionId,
       status: 'idle',
       options: options.agentOptions ?? {},
+      model: { current: () => options.agentOptions ?? {} },
       session,
       ctx: childCtx,
       inbox: { nextStep: [], nextTurn: [] },
@@ -235,6 +241,123 @@ async function post(runtime, routeName, args) {
     rawBody: res.rawBody,
     body: JSON.parse(res.rawBody),
   }
+}
+
+/** Minimal stand-in for `ctx.get('attachments')` backed by an in-memory object map. */
+function makeAttachmentsService(options = {}) {
+  const stored = new Map()
+  const saves = []
+  const limits = options.limits ?? { mediaTypes: ['image/png', 'image/jpeg'], maxImageBytes: 1024 }
+  const idOf = (bytes) => `sha256:${Buffer.from(`img:${bytes.length}:${saves.length}`).toString('hex').padEnd(64, '0').slice(0, 64)}`
+  const service = {
+    imageLimits: limits,
+    saves,
+    stored,
+    isAttachmentError(error) {
+      return error instanceof Error && typeof error.code === 'string'
+    },
+    async saveImages(inputs) {
+      if (options.saveFailure !== undefined) throw options.saveFailure
+      const refs = []
+      for (const input of inputs) {
+        saves.push(input)
+        const attachmentId = idOf(input.data)
+        const ref = {
+          attachmentId,
+          mediaType: input.mediaType,
+          width: 2,
+          height: 2,
+          bytes: input.data.length,
+          ...(input.name === undefined ? {} : { name: input.name }),
+        }
+        stored.set(attachmentId, input.data)
+        refs.push(ref)
+      }
+      return refs
+    },
+    async admitPromptContent(content) {
+      if (options.admitFailure !== undefined) throw options.admitFailure
+      return content.map((part) => (part.type === 'image'
+        ? { type: 'image', attachment: part.attachment }
+        : { type: 'text', text: part.text }))
+    },
+    async readImage(ref) {
+      if (options.readFailure !== undefined) throw options.readFailure
+      const data = stored.get(ref.attachmentId)
+      if (data === undefined) {
+        const error = new Error('Attachment object is missing.')
+        error.code = 'ATTACHMENT_NOT_FOUND'
+        throw error
+      }
+      if (ref.bytes !== data.length) {
+        const error = new Error('Stored attachment metadata does not match its reference.')
+        error.code = 'ATTACHMENT_CORRUPT'
+        throw error
+      }
+      return { ref, data }
+    },
+  }
+  return service
+}
+
+/** Drive the raw-binary upload route with a query object and a body. */
+async function uploadImage(runtime, query, body) {
+  const route = runtime.routes.get(`${ROUTE_PREFIX}attachment`)
+  assert.ok(route !== undefined, 'the upload route is registered')
+  const search = new URLSearchParams(query).toString()
+  const req = {
+    method: 'POST',
+    url: `${ROUTE_PREFIX}attachment${search === '' ? '' : `?${search}`}`,
+    [Symbol.asyncIterator]: async function* () {
+      yield body
+    },
+  }
+  const result = await collectResponse(route, req)
+  return {
+    ...result,
+    body: result.rawBody === undefined || result.rawBody.length === 0 ? undefined : JSON.parse(result.rawBody),
+  }
+}
+
+/** Drive the image read route (GET or HEAD). */
+async function readImageRoute(runtime, query, method = 'GET') {
+  const route = runtime.routes.get(`${ROUTE_PREFIX}image`)
+  assert.ok(route !== undefined, 'the image route is registered')
+  const search = new URLSearchParams(query).toString()
+  const req = { method, url: `${ROUTE_PREFIX}image${search === '' ? '' : `?${search}`}` }
+  return await collectResponse(route, req)
+}
+
+function collectResponse(route, req) {
+  let res
+  const done = new Promise((resolve) => {
+    res = {
+      statusCode: undefined,
+      headers: undefined,
+      rawBody: undefined,
+      writeHead(statusCode, headers) {
+        this.statusCode = statusCode
+        this.headers = headers
+      },
+      end(body) {
+        this.rawBody = body
+        resolve()
+      },
+    }
+  })
+  return route.handler(req, res).then(async () => {
+    await done
+    return { status: res.statusCode, headers: res.headers, rawBody: res.rawBody }
+  })
+}
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+
+/** Create a side session and return its id. */
+async function createSideSession(runtime) {
+  const created = await post(runtime, 'create', { sourceId: 'main-1' })
+  assert.equal(created.body.ok, true)
+  return created.body.sessionId
 }
 
 const BASE_EVENTS = [
@@ -371,10 +494,12 @@ test('apply registers every contract route', () => {
   const runtime = makeRuntime()
   apply(runtime.ctx)
   assert.deepEqual([...runtime.routes.keys()].sort(), [
+    `${ROUTE_PREFIX}attachment`,
     `${ROUTE_PREFIX}cancel`,
     `${ROUTE_PREFIX}close`,
     `${ROUTE_PREFIX}create`,
     `${ROUTE_PREFIX}events`,
+    `${ROUTE_PREFIX}image`,
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
     `${ROUTE_PREFIX}references`,
@@ -1555,13 +1680,13 @@ test('references validates the query string and its 512-character cap', async ()
   assert.equal(calls.length, 2, 'no provider lookup runs for an invalid query')
 })
 
-test('references answers unavailable when the provider is absent or degraded', async () => {
+test('references answers unavailable only when no reference provider can answer', async () => {
   const absent = makeRuntime({ parents: [makeParent()] })
   apply(absent.ctx)
   assert.deepEqual((await postReferences(absent, { sourceId: 'main-1', query: 'x' })).body, {
     ok: false,
     code: 'unavailable',
-    message: 'file reference provider is unavailable',
+    message: 'reference providers are unavailable',
   })
 
   const degraded = makeRuntime({ parents: [makeParent()], services: { fileReferences: {} } })
@@ -1658,4 +1783,652 @@ test('references suppresses the response and the warning when the aborted lookup
   assert.equal(res.statusCode, undefined, 'no response status is written')
   assert.equal(res.chunks.length, 0, 'no response body is written')
   assert.equal(runtime.warnings.length, 0, 'a cancelled lookup is not a failure')
+})
+
+function sessionPayload(sessionId) {
+  return Buffer.from(JSON.stringify(sessionId), 'utf8').toString('base64url')
+}
+
+function combinedReferenceProvider({ files = [], sessions = [], omitFiles = false, omitSessions = false, fileError, sessionError, fileCalls = [], sessionCalls = [] } = {}) {
+  const services = {}
+  if (omitFiles) {
+    // No `fileReferences` service at all.
+  } else if (fileError !== undefined) {
+    services.fileReferences = {
+      list() {
+        throw fileError
+      },
+    }
+  } else {
+    services.fileReferences = {
+      list(agent, query, signal) {
+        fileCalls.push({ agent, query, signal })
+        return files
+      },
+    }
+  }
+  if (omitSessions) {
+    // No `sessionReferenceResolver` service at all.
+  } else if (sessionError !== undefined) {
+    services.sessionReferenceResolver = {
+      listCandidates() {
+        throw sessionError
+      },
+    }
+  } else {
+    services.sessionReferenceResolver = {
+      listCandidates(agent, query, limit, signal) {
+        sessionCalls.push({ agent, query, limit, signal })
+        return sessions
+      },
+    }
+  }
+  return services
+}
+
+test('sessionReferenceMention renders the canonical DSH spelling and escapes the label', () => {
+  assert.equal(
+    sessionReferenceMention('session-1', 'Fix login'),
+    `@[Fix login](dsh-session:${sessionPayload('session-1')})`,
+  )
+  assert.equal(
+    sessionReferenceMention('session-1', 'a]b\\c'),
+    `@[a\\]b\\\\c](dsh-session:${sessionPayload('session-1')})`,
+  )
+  assert.equal(
+    sessionReferenceMention('session-1'),
+    `@[session-1](dsh-session:${sessionPayload('session-1')})`,
+  )
+  assert.equal(sessionReferenceMention('', 'title'), undefined)
+  assert.equal(
+    sessionReferenceMention('session-1', 'a\nb'),
+    `@[a b](dsh-session:${sessionPayload('session-1')})`,
+  )
+})
+
+test('abbreviateHomePath shortens only a home-rooted path', () => {
+  assert.equal(abbreviateHomePath('/Users/me/work', '/Users/me'), '~/work')
+  assert.equal(abbreviateHomePath('/Users/me', '/Users/me'), '~')
+  assert.equal(abbreviateHomePath('/Users/me2/work', '/Users/me'), '/Users/me2/work')
+  assert.equal(abbreviateHomePath('/other', '/Users/me'), '/other')
+  assert.equal(abbreviateHomePath('relative', '/Users/me'), 'relative')
+  assert.equal(abbreviateHomePath('/Users/me/work', ''), '/Users/me/work')
+})
+
+test('sessionReferenceCandidates projects display titles, locations and mentions', () => {
+  const agent = makeParent({ cwd: '/workspace' })
+  const listed = [
+    { sessionId: 's-1', label: 'Old title', displayTitle: 'Fix login', sameWorkspace: true, createdAt: 10 },
+    { sessionId: 's-2', label: 'Other', cwd: '/Users/me/other', sameWorkspace: false, createdAt: 20 },
+    { sessionId: 's-3', label: 'No cwd', sameWorkspace: false, createdAt: 30 },
+    { sessionId: 's-5', label: 'a\nb', sameWorkspace: true, createdAt: 40 },
+    { sessionId: 's-4', label: '', sameWorkspace: false },
+    { sessionId: '', label: 'x' },
+    null,
+    'nope',
+  ]
+  assert.deepEqual(sessionReferenceCandidates(listed, agent, '/Users/me'), [
+    {
+      kind: 'session',
+      sessionId: 's-1',
+      label: 'Fix login',
+      mention: `@[Fix login](dsh-session:${sessionPayload('s-1')})`,
+      createdAt: 10,
+    },
+    {
+      kind: 'session',
+      sessionId: 's-2',
+      label: 'Other',
+      mention: `@[Other](dsh-session:${sessionPayload('s-2')})`,
+      createdAt: 20,
+      location: '~/other',
+    },
+    {
+      kind: 'session',
+      sessionId: 's-3',
+      label: 'No cwd',
+      mention: `@[No cwd](dsh-session:${sessionPayload('s-3')})`,
+      createdAt: 30,
+      location: null,
+    },
+    {
+      kind: 'session',
+      sessionId: 's-5',
+      label: 'a b',
+      mention: `@[a b](dsh-session:${sessionPayload('s-5')})`,
+      createdAt: 40,
+    },
+  ])
+  assert.deepEqual(sessionReferenceCandidates(undefined, agent, '/Users/me'), [])
+  assert.deepEqual(sessionReferenceCandidates('nope', agent, '/Users/me'), [])
+})
+
+test('references merges file and session rows, files first, and skips sessions for quoted queries', async () => {
+  const fileCalls = []
+  const sessionCalls = []
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      files: [{ path: 'src/a.js', kind: 'file' }],
+      sessions: [
+        { sessionId: 's-1', label: 'Older', sameWorkspace: true, createdAt: 10 },
+        { sessionId: 's-2', label: 'Other', cwd: '/tmp/x', sameWorkspace: false, createdAt: 20 },
+      ],
+      fileCalls,
+      sessionCalls,
+    }),
+  })
+  apply(runtime.ctx)
+
+  const unquoted = await postReferences(runtime, { sourceId: 'main-1', query: 'x' })
+  assert.deepEqual(unquoted.body, {
+    ok: true,
+    candidates: [
+      { path: 'src/a.js', kind: 'file' },
+      {
+        kind: 'session',
+        sessionId: 's-1',
+        label: 'Older',
+        mention: `@[Older](dsh-session:${sessionPayload('s-1')})`,
+        createdAt: 10,
+      },
+      {
+        kind: 'session',
+        sessionId: 's-2',
+        label: 'Other',
+        mention: `@[Other](dsh-session:${sessionPayload('s-2')})`,
+        createdAt: 20,
+        location: '/tmp/x',
+      },
+    ],
+  })
+  assert.equal(fileCalls.length, 1)
+  assert.equal(sessionCalls.length, 1)
+  assert.equal(sessionCalls[0].query, 'x')
+  assert.equal(sessionCalls[0].limit, undefined)
+  assert.ok(sessionCalls[0].signal instanceof AbortSignal)
+
+  const quoted = await postReferences(runtime, { sourceId: 'main-1', query: 'x', quoted: true })
+  assert.deepEqual(quoted.body, { ok: true, candidates: [{ path: 'src/a.js', kind: 'file' }] })
+  assert.equal(sessionCalls.length, 1, 'a quoted query never asks for sessions')
+})
+
+test('references keeps the working domain when the other one fails', async () => {
+  const fileFailure = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      sessions: [{ sessionId: 's-1', label: 'Fix login', sameWorkspace: true, createdAt: 10 }],
+      fileError: new Error('scan failed'),
+    }),
+  })
+  apply(fileFailure.ctx)
+  const sessionsOnly = await postReferences(fileFailure, { sourceId: 'main-1', query: 'f' })
+  assert.equal(sessionsOnly.body.ok, true)
+  assert.deepEqual(sessionsOnly.body.candidates, [{
+    kind: 'session',
+    sessionId: 's-1',
+    label: 'Fix login',
+    mention: `@[Fix login](dsh-session:${sessionPayload('s-1')})`,
+    createdAt: 10,
+  }])
+  assert.ok(fileFailure.warnings.some((warning) => warning.includes('file reference lookup failed')))
+
+  const sessionFailure = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      files: [{ path: 'src/a.js', kind: 'file' }],
+      sessionError: new Error('candidates failed'),
+    }),
+  })
+  apply(sessionFailure.ctx)
+  const filesOnly = await postReferences(sessionFailure, { sourceId: 'main-1', query: 'a' })
+  assert.deepEqual(filesOnly.body, { ok: true, candidates: [{ path: 'src/a.js', kind: 'file' }] })
+  assert.ok(sessionFailure.warnings.some((warning) => warning.includes('session reference lookup failed')))
+
+  const bothFail = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      fileError: new Error('file failed'),
+      sessionError: new Error('session failed'),
+    }),
+  })
+  apply(bothFail.ctx)
+  const failed = await postReferences(bothFail, { sourceId: 'main-1', query: 'a' })
+  assert.deepEqual(failed.body, { ok: false, code: 'unavailable', message: 'file failed' })
+})
+
+test('references lists sessions even when the file-reference provider is absent', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      omitFiles: true,
+      sessions: [{ sessionId: 's-1', label: 'Fix login', sameWorkspace: true, createdAt: 10 }],
+    }),
+  })
+  apply(runtime.ctx)
+  const response = await postReferences(runtime, { sourceId: 'main-1', query: '' })
+  assert.equal(response.body.ok, true)
+  assert.deepEqual(response.body.candidates, [{
+    kind: 'session',
+    sessionId: 's-1',
+    label: 'Fix login',
+    mention: `@[Fix login](dsh-session:${sessionPayload('s-1')})`,
+    createdAt: 10,
+  }])
+
+  const quoted = await postReferences(runtime, { sourceId: 'main-1', query: '', quoted: true })
+  assert.deepEqual(quoted.body, { ok: true, candidates: [] })
+})
+
+test('references aborts both lookups when the client disconnects', async () => {
+  const fileCalls = []
+  const sessionCalls = []
+  let resolveFiles
+  let resolveSessions
+  const filesPending = new Promise((resolve) => {
+    resolveFiles = resolve
+  })
+  const sessionsPending = new Promise((resolve) => {
+    resolveSessions = resolve
+  })
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: {
+      fileReferences: {
+        list(agent, query, signal) {
+          fileCalls.push(signal)
+          return filesPending
+        },
+      },
+      sessionReferenceResolver: {
+        listCandidates(agent, query, limit, signal) {
+          sessionCalls.push(signal)
+          return sessionsPending
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+
+  const route = runtime.routes.get(`${ROUTE_PREFIX}references`)
+  const req = makeStreamRequest(JSON.stringify({ sourceId: 'main-1', query: 'src' }))
+  const res = makeStreamResponse()
+  const handler = route.handler(req, res)
+  await waitFor(() => fileCalls.length === 1 && sessionCalls.length === 1)
+  req.listeners.get('close')()
+  assert.equal(fileCalls[0].aborted, true)
+  assert.equal(sessionCalls[0].aborted, true)
+  resolveFiles([{ path: 'src/a.js', kind: 'file' }])
+  resolveSessions([])
+  await handler
+  assert.equal(res.statusCode, undefined)
+  assert.equal(res.chunks.length, 0)
+})
+
+test('the combined reference route frames correctly over a real HTTP server', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: combinedReferenceProvider({
+      files: [{ path: 'src/a.js', kind: 'file' }],
+      sessions: [{ sessionId: 's-1', label: 'Fix login', sameWorkspace: true, createdAt: 10 }],
+    }),
+  })
+  apply(runtime.ctx)
+
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+    const route = runtime.routes.get(pathname)
+    if (route === undefined) {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    route.handler(req, res).catch(() => {
+      try {
+        res.destroy()
+      } catch {
+        // The carrier is already gone.
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const base = `http://127.0.0.1:${port}`
+  try {
+    const response = await fetch(`${base}/side-chat/api/references`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId: 'main-1', query: 'f' }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'application/json; charset=utf-8')
+    const body = await response.json()
+    assert.equal(body.ok, true)
+    assert.deepEqual(body.candidates, [
+      { path: 'src/a.js', kind: 'file' },
+      {
+        kind: 'session',
+        sessionId: 's-1',
+        label: 'Fix login',
+        mention: `@[Fix login](dsh-session:${sessionPayload('s-1')})`,
+        createdAt: 10,
+      },
+    ])
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('imageAttachmentRef normalizes a well-formed reference and refuses malformed ones', () => {
+  const id = `sha256:${'a'.repeat(64)}`
+  assert.deepEqual(imageAttachmentRef({ attachmentId: id, mediaType: 'image/png', width: 2, height: 3, bytes: 4 }), {
+    attachmentId: id,
+    mediaType: 'image/png',
+    width: 2,
+    height: 3,
+    bytes: 4,
+  })
+  assert.deepEqual(imageAttachmentRef({ attachmentId: id, mediaType: 'image/png', width: 2, height: 3, bytes: 4, name: ' shot.png ' }), {
+    attachmentId: id,
+    mediaType: 'image/png',
+    width: 2,
+    height: 3,
+    bytes: 4,
+    name: 'shot.png',
+  })
+  assert.deepEqual(imageAttachmentRef({ attachmentId: id, mediaType: 'image/png', width: 2, height: 3, bytes: 4, originalDimensions: { width: 8, height: 9 } }), {
+    attachmentId: id,
+    mediaType: 'image/png',
+    width: 2,
+    height: 3,
+    bytes: 4,
+    originalDimensions: { width: 8, height: 9 },
+  })
+  assert.equal(imageAttachmentRef(null), undefined)
+  assert.equal(imageAttachmentRef({ attachmentId: 'sha256:abc', mediaType: 'image/png', width: 2, height: 2, bytes: 1 }), undefined, 'the id must be a full sha256 reference')
+  assert.equal(imageAttachmentRef({ attachmentId: id, mediaType: '', width: 2, height: 2, bytes: 1 }), undefined)
+  assert.equal(imageAttachmentRef({ attachmentId: id, mediaType: 'image/png', width: 0, height: 2, bytes: 1 }), undefined)
+  assert.equal(imageAttachmentRef({ attachmentId: id, mediaType: 'image/png', width: 2, height: 'x', bytes: 1 }), undefined)
+})
+
+test('projectQueue keeps image-only prompts and counts their images', () => {
+  const id = `sha256:${'b'.repeat(64)}`
+  const rows = projectQueue({
+    nextStep: [{ id: 's1', content: [{ type: 'image', attachment: { attachmentId: id, mediaType: 'image/png', width: 2, height: 2, bytes: 3 } }] }],
+    nextTurn: [
+      { id: 'q1', content: [{ type: 'text', text: 'look' }, { type: 'image', attachment: { attachmentId: id, mediaType: 'image/png', width: 2, height: 2, bytes: 3 } }] },
+      { id: 'q2', content: [{ type: 'text', text: '' }] },
+    ],
+  })
+  assert.deepEqual(rows.map((row) => row.id), ['s1', 'q1'])
+  assert.deepEqual(rows.map((row) => row.images), [1, 1])
+  assert.equal(rows[0].text, '')
+  assert.equal(rows[0].placement, 'steering')
+  assert.equal(rows[1].text, 'look')
+})
+
+test('the upload route stores an image for the addressed parent before any side session exists', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+
+  const result = await uploadImage(runtime, { sourceId: 'main-1', mime: 'image/png', name: 'shot.png' }, PNG_BYTES)
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  const ref = result.body.attachment
+  assert.match(ref.attachmentId, /^sha256:[a-f0-9]{64}$/)
+  assert.equal(ref.mediaType, 'image/png')
+  assert.equal(ref.bytes, PNG_BYTES.length)
+  assert.equal(ref.name, 'shot.png')
+  assert.equal(attachments.saves.length, 1)
+  assert.deepEqual(attachments.saves[0].data, new Uint8Array(PNG_BYTES))
+  assert.equal(attachments.saves[0].mediaType, 'image/png')
+
+  const forSession = await uploadImage(runtime, { sessionId: 'side-chat-nope', mime: 'image/png' }, PNG_BYTES)
+  assert.deepEqual({ ok: forSession.body.ok, code: forSession.body.code }, { ok: false, code: 'not-found' })
+  const unknownParent = await uploadImage(runtime, { sourceId: 'main-x', mime: 'image/png' }, PNG_BYTES)
+  assert.equal(unknownParent.body.code, 'unknown-source')
+  const noIdentity = await uploadImage(runtime, { mime: 'image/png' }, PNG_BYTES)
+  assert.equal(noIdentity.body.code, 'bad-request')
+  const wrongMethod = await collectResponse(runtime.routes.get(`${ROUTE_PREFIX}attachment`), { method: 'GET', url: `${ROUTE_PREFIX}attachment` })
+  assert.equal(JSON.parse(wrongMethod.rawBody).code, 'bad-request')
+})
+
+test('the upload route maps provider refusals to attachment-rejected with a reason', async () => {
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments: makeAttachmentsService({ limits: { mediaTypes: ['image/png'], maxImageBytes: 4 } }) } })
+  apply(runtime.ctx)
+
+  const unsupported = await uploadImage(runtime, { sourceId: 'main-1', mime: 'image/gif' }, PNG_BYTES)
+  assert.equal(unsupported.body.ok, false)
+  assert.equal(unsupported.body.code, 'attachment-rejected')
+  assert.equal(unsupported.body.reason, 'UNSUPPORTED_IMAGE_TYPE')
+
+  const tooLarge = await uploadImage(runtime, { sourceId: 'main-1', mime: 'image/png' }, Buffer.from([1, 2, 3, 4, 5]))
+  assert.equal(tooLarge.body.code, 'attachment-rejected')
+  assert.equal(tooLarge.body.reason, 'IMAGE_TOO_LARGE')
+
+  const empty = await uploadImage(runtime, { sourceId: 'main-1', mime: 'image/png' }, Buffer.alloc(0))
+  assert.equal(empty.body.code, 'attachment-rejected')
+  assert.equal(empty.body.reason, 'INVALID_IMAGE')
+
+  const failing = new Error('normalization failed')
+  failing.code = 'IMAGE_TYPE_MISMATCH'
+  const failingRuntime = makeRuntime({
+    parents: [makeParent()],
+    services: { attachments: makeAttachmentsService({ saveFailure: failing }) },
+  })
+  apply(failingRuntime.ctx)
+  const rejected = await uploadImage(failingRuntime, { sourceId: 'main-1', mime: 'image/png' }, PNG_BYTES)
+  assert.equal(rejected.body.ok, false)
+  assert.equal(rejected.body.code, 'attachment-rejected')
+  assert.equal(rejected.body.reason, 'IMAGE_TYPE_MISMATCH')
+})
+
+test('prompt maps an admission refusal to attachment-rejected instead of sending', async () => {
+  const attachments = makeAttachmentsService()
+  attachments.admitPromptContent = async () => {
+    const error = new Error('Image batch exceeds the configured image-count limit.')
+    error.code = 'TOO_MANY_IMAGES'
+    throw error
+  }
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+  const sessionId = await createSideSession(runtime)
+  const uploaded = await uploadImage(runtime, { sessionId, mime: 'image/png' }, PNG_BYTES)
+  const refused = await post(runtime, 'prompt', {
+    sessionId,
+    text: 'many',
+    attachments: [uploaded.body.attachment.attachmentId],
+  })
+  assert.equal(refused.body.ok, false)
+  assert.equal(refused.body.code, 'attachment-rejected')
+  assert.equal(refused.body.reason, 'TOO_MANY_IMAGES')
+  assert.equal(runtime.handles[0].agent.followups.length, 0)
+})
+
+test('the upload route answers unavailable without an attachment service', async () => {
+  const runtime = makeRuntime({ parents: [makeParent()] })
+  apply(runtime.ctx)
+  const result = await uploadImage(runtime, { sourceId: 'main-1', mime: 'image/png' }, PNG_BYTES)
+  assert.equal(result.body.ok, false)
+  assert.equal(result.body.code, 'unavailable')
+})
+
+test('prompt admits staged images and appends one user message with them', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+  const sessionId = await createSideSession(runtime)
+  const uploaded = await uploadImage(runtime, { sessionId, mime: 'image/png' }, PNG_BYTES)
+  const attachmentId = uploaded.body.attachment.attachmentId
+
+  const imageOnly = await post(runtime, 'prompt', { sessionId, text: '', attachments: [attachmentId] })
+  assert.equal(imageOnly.body.ok, true)
+  const agent = runtime.handles[0].agent
+  const message = agent.followups[0]
+  assert.deepEqual(message.content, [{ type: 'image', attachment: uploaded.body.attachment }])
+  assert.deepEqual(message.source, { kind: 'user' })
+
+  const withText = await post(runtime, 'prompt', { sessionId, text: 'look at this', attachments: [attachmentId] })
+  assert.equal(withText.body.ok, true)
+  assert.deepEqual(agent.followups[1].content, [
+    { type: 'text', text: 'look at this' },
+    { type: 'image', attachment: uploaded.body.attachment },
+  ])
+})
+
+test('prompt refuses unknown or malformed attachment ids without appending', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+  const sessionId = await createSideSession(runtime)
+  const agent = runtime.handles[0].agent
+
+  const unknown = await post(runtime, 'prompt', { sessionId, text: '', attachments: [`sha256:${'c'.repeat(64)}`] })
+  assert.equal(unknown.body.ok, false)
+  assert.equal(unknown.body.code, 'attachment-rejected')
+  assert.equal(unknown.body.reason, 'ATTACHMENT_NOT_FOUND')
+
+  const malformed = await post(runtime, 'prompt', { sessionId, text: 'x', attachments: ['not-an-id'] })
+  assert.equal(malformed.body.code, 'bad-request')
+
+  const notAnArray = await post(runtime, 'prompt', { sessionId, text: 'x', attachments: 'nope' })
+  assert.equal(notAnArray.body.code, 'bad-request')
+
+  const empty = await post(runtime, 'prompt', { sessionId, text: '   ' })
+  assert.equal(empty.body.code, 'empty-prompt')
+  assert.equal(agent.followups.length, 0)
+})
+
+test('prompt refuses images on a text-only route before appending', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({
+    parents: [makeParent()],
+    services: {
+      attachments,
+      llm: { resolveModelInfo: async () => ({ inputModalities: ['text'] }) },
+    },
+  })
+  apply(runtime.ctx)
+  const sessionId = await createSideSession(runtime)
+  const uploaded = await uploadImage(runtime, { sessionId, mime: 'image/png' }, PNG_BYTES)
+
+  const refused = await post(runtime, 'prompt', {
+    sessionId,
+    text: '',
+    attachments: [uploaded.body.attachment.attachmentId],
+  })
+  assert.equal(refused.body.ok, false)
+  assert.equal(refused.body.code, 'attachment-rejected')
+  assert.equal(refused.body.reason, 'MODEL_DOES_NOT_SUPPORT_IMAGES')
+  assert.equal(runtime.handles[0].agent.followups.length, 0)
+})
+
+test('the image route serves a referenced image and hides everything else', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+  const sessionId = await createSideSession(runtime)
+  const uploaded = await uploadImage(runtime, { sessionId, mime: 'image/png' }, PNG_BYTES)
+  const ref = uploaded.body.attachment
+  const query = {
+    sessionId,
+    attachmentId: ref.attachmentId,
+    mediaType: ref.mediaType,
+    width: String(ref.width),
+    height: String(ref.height),
+    bytes: String(ref.bytes),
+  }
+
+  const beforeSend = await readImageRoute(runtime, query)
+  assert.equal(beforeSend.status, 404, 'an uploaded but unsent image is not served')
+  assert.equal(beforeSend.rawBody, undefined)
+
+  await post(runtime, 'prompt', { sessionId, text: '', attachments: [ref.attachmentId] })
+  const served = await readImageRoute(runtime, query)
+  assert.equal(served.status, 200)
+  assert.equal(served.headers['Content-Type'], 'image/png')
+  assert.equal(served.headers['Cache-Control'], 'private, max-age=31536000, immutable')
+  assert.deepEqual(Buffer.from(served.rawBody), PNG_BYTES)
+
+  const unknownSession = await readImageRoute(runtime, { ...query, sessionId: 'side-chat-nope' })
+  assert.equal(unknownSession.status, 404)
+  const forgedBytes = await readImageRoute(runtime, { ...query, bytes: '999' })
+  assert.equal(forgedBytes.status, 404)
+  const forgedId = await readImageRoute(runtime, { ...query, attachmentId: `sha256:${'d'.repeat(64)}` })
+  assert.equal(forgedId.status, 404)
+  const missing = await readImageRoute(runtime, { sessionId })
+  assert.equal(missing.status, 404)
+  const wrongMethod = await readImageRoute(runtime, query, 'POST')
+  assert.equal(wrongMethod.status, 405)
+})
+
+test('the raw image routes frame correctly over a real HTTP server', async () => {
+  const attachments = makeAttachmentsService()
+  const runtime = makeRuntime({ parents: [makeParent()], services: { attachments } })
+  apply(runtime.ctx)
+
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+    const route = runtime.routes.get(pathname)
+    if (route === undefined) {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    route.handler(req, res).catch(() => {
+      try {
+        res.destroy()
+      } catch {
+        // The carrier is already gone.
+      }
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const base = `http://127.0.0.1:${port}`
+  try {
+    const created = await fetch(`${base}/side-chat/api/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceId: 'main-1' }),
+    }).then((response) => response.json())
+    assert.equal(created.ok, true)
+
+    const uploadedResponse = await fetch(`${base}/side-chat/api/attachment?sessionId=${encodeURIComponent(created.sessionId)}&mime=image%2Fpng`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: PNG_BYTES,
+    })
+    assert.equal(uploadedResponse.status, 200)
+    const uploaded = await uploadedResponse.json()
+    assert.equal(uploaded.ok, true)
+    const ref = uploaded.attachment
+
+    const promptResponse = await fetch(`${base}/side-chat/api/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: created.sessionId, text: '', attachments: [ref.attachmentId] }),
+    }).then((response) => response.json())
+    assert.equal(promptResponse.ok, true)
+
+    const query = new URLSearchParams({
+      sessionId: created.sessionId,
+      attachmentId: ref.attachmentId,
+      mediaType: ref.mediaType,
+      width: String(ref.width),
+      height: String(ref.height),
+      bytes: String(ref.bytes),
+    })
+    const imageResponse = await fetch(`${base}/side-chat/api/image?${query.toString()}`)
+    assert.equal(imageResponse.status, 200)
+    assert.equal(imageResponse.headers.get('content-type'), 'image/png')
+    const bytes = Buffer.from(await imageResponse.arrayBuffer())
+    assert.deepEqual(bytes, PNG_BYTES)
+
+    const missing = await fetch(`${base}/side-chat/api/image?${query.toString().replace('sessionId', 'sessionId=nope&x')}`)
+    assert.equal(missing.status, 404)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })

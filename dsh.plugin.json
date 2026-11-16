@@ -10,7 +10,7 @@
   "license": "MIT",
   "homepage": "https://github.com/flyer103/dsh-side-chat",
   "testedWith": {
-    "dsh": "0.2.1-rc.2",
-    "note": "metadata only; DSH 0.2.1 does not read this file and enforces nothing from it"
+    "dsh": "0.2.2-rc.3",
+    "note": "metadata only; DSH does not read this file and enforces nothing from it"
   }
 }

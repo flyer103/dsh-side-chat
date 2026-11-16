@@ -1,8 +1,8 @@
 # Usage — dsh-side-chat
 
 This is the semantic reference for `@flyer103/dsh-side-chat`: what a side chat inherits,
-what it isolates, what it may change, and what closing it destroys. It describes the
-shipped `0.7.1` on DSH `0.2.1-rc.2`; see [DESIGN.md](DESIGN.md) for rationale and
+what it isolates, what it may change, and what closing it destroys. It describes the current
+release line (tested on DSH `0.2.2-rc.3`); see [DESIGN.md](DESIGN.md) for rationale and
 [CONTRACT.md](CONTRACT.md) for the host/client wire contract.
 
 English | [中文](../README.zh.md)
@@ -11,11 +11,11 @@ English | [中文](../README.zh.md)
 
 | item | value |
 |---|---|
-| DSH | tested on `0.2.1-rc.2`; the host half is a plain ESM Cordis plugin |
+| DSH | tested on `0.2.2-rc.3`; the host half is a plain ESM Cordis plugin |
 | UI surface | Web GUI only (`dsh.client.platform: web`), as a native tab in the right Sidebar; includes the Desktop app window |
 | Node.js | `>= 22` for the repository and its tests; the plugin has no runtime dependencies |
 | profile | a normal DSH profile such as `desktop` or `web` |
-| services | `webServer`, `agents`, `timer` are required; `sessionPersistence` is used when present |
+| services | `webServer`, `agents`, `timer` are required; `sessionPersistence`, `attachments`, `fileReferences`, `sessionReferenceResolver` are used when present |
 | UI language | follows the DSH language setting: `zh` and `en` are built in; other languages fall back to English |
 
 The plugin imports nothing from `@deepseek-ai/*`, so there is no build step and no version
@@ -318,33 +318,105 @@ The dock follows the DSH language setting like the rest of the panel. Its conten
 it does not follow the Performance & usage detailed/compact preference, and there is no
 setting to hide it.
 
-## File references (`@`)
+## References (`@`)
 
-The composer completes workspace paths the same way the main composer does. The pick inserts
-a plain `@path` mention into the prompt; DSH's own file-reference guidance (installed on every
+The composer searches the same two domains as the main composer — workspace paths and
+sessions — and sends the same prompt spellings (a session mention is assembled when the
+message is sent). The plugin itself reads no file content and no session log; a picked
+reference is text, and any content comes from DSH's own services.
+
+### Files and folders
+
+The pick inserts a plain `@path` mention; DSH's file-reference guidance (installed on every
 agent that can call `read`) tells the model to read the referenced file, so the pick itself
 reads nothing and sends no content.
 
-- Type `@` at the start of the message or after a space to open the path menu for this side
+- Type `@` at the start of the message or after a space to open the menu for this side
   chat's working directory (inherited from the parent). Keep typing to narrow it. `@"` starts
   a quoted path for names with spaces; picking a directory inserts its trailing slash and
   keeps the menu open inside that directory.
-- Keyboard: Up/Down move through the rows (wrapping), Enter or Tab inserts the highlighted
-  path, Escape closes, and moving focus out of the composer closes it. Mouse picking works
-  too and keeps textarea focus. While the menu has a candidate, Enter picks instead of
-  sending; when there is nothing to pick (still loading or no match), Enter closes the menu
-  and sends the draft. With the provider unavailable the menu never opens and Enter simply
-  sends.
 - The inserted spelling matches the main composer: `@path`, `@"path with spaces"`, `@dir/`,
   or an open `@"dir/` while descending into a quoted directory. Committed user bubbles show
   such references as chips.
 - Before the first message the tab has no side session yet, so the menu lists the parent
   session's working directory; once the side session exists it uses the side session's own
   agent. Either way discovery is bounded by the same workspace and returns names only.
-- A profile without a file-reference provider (the shipped web stack has one) shows no menu;
-  typing `@...` still sends the text unchanged.
-- Only files and folders are completed in this version. `@session` references, `/` commands
-  and skills, attachments, and drag-and-drop are not part of the side-chat composer yet.
+
+### Sessions
+
+The menu also lists other sessions (titles, and their workspace only when it differs from
+this side chat's). Picking one references it the way the main composer does: the draft shows a
+readable `@[title]`, sending expands it to the canonical `@[title](dsh-session:…)` mention,
+and DSH's session-reference service prepares a read-only snapshot of that session as context
+for this side conversation's next request. This is the same service the main session uses, so
+the budget, truncation and "untrusted reference" rules are DSH's, not this plugin's.
+
+- Sessions are searched only for an unquoted `@`; `@"…` searches paths only, like the main
+  composer. Discovery matches session title, id and working directory — never transcript text.
+- The side-chat menu lists sessions from the same workspace first. The addressed agent itself
+  is never offered: before the first message that is the parent session, after it that is the
+  side session. The parent's history is already inherited through the fork seed.
+- The readable `@[title]` token is editable text: if you change or delete it before sending,
+  that reference is dropped (and the literal text is sent) rather than pointing at a wrong
+  session. Duplicate picks of the same session expand one occurrence each.
+- A profile whose DSH build does not mount `sessionReferenceResolver` simply lists files only.
+- A session-reference preparation failure happens after the prompt is accepted and terminates
+  that side turn, exactly as it does in the main session; the tab then shows the turn error
+  through its normal error/status path.
+
+### Keyboard and failure behavior
+
+- Keyboard: Up/Down move through the rows (wrapping), Enter or Tab inserts the highlighted
+  row, Escape closes, and moving focus out of the composer closes it. Mouse picking works too
+  and keeps textarea focus. While the menu has a candidate, Enter picks instead of sending;
+  when there is nothing to pick (still loading or no match), Enter closes the menu and sends
+  the draft.
+- With neither reference provider available the menu never opens and Enter simply sends; an
+  `unavailable` answer is remembered for that tab, so a transient failure hides the menu until
+  the tab is reopened.
+- Session chips in committed user bubbles are presentation only: no click, no navigation.
+- `/` commands, skills and generic (non-image) file attachments are not part of the side-chat
+  composer.
+
+## Images in the composer
+
+The composer accepts images the same way the main composer does, and stores them through
+DSH's own attachment pipeline — the plugin never reads or interprets image bytes itself.
+
+- **Three inputs**: paste an image (a screenshot, or an image copied from the file manager),
+  drop image files onto the composer card, or press the paperclip button and pick one or more
+  images. Accepted types are the deployment's image media types (PNG, JPEG, WebP and GIF with
+  the shipped attachment provider). A dropped or pasted non-image file is ignored (no message,
+  no upload); dropping it still never navigates the page away.
+- **Upload immediately**: each image starts uploading as soon as it is added. The rail above
+  the textarea shows a local preview plus `uploading`, `ready` or `error`; a rejected file
+  shows the localized reason and can be retried or removed. Uploads never block typing, the
+  `@` menu, IME composition or `Enter`.
+- **Deployment limits apply**: per-image source bytes, pixel and dimension limits, images per
+  message, and the aggregate bytes per message are the mounted attachment provider's policy,
+  not this plugin's. The composer accepts the same images the main composer would; the reason
+  code comes back when something is refused.
+- **Send**: `Enter` sends the text plus every `ready` image, in the order they were added. A
+  message may contain only images — no text is required. Images that are still uploading or
+  failed are not sent; they stay in the rail so you can retry or remove them after the send.
+  A rejected send keeps the draft and returns the sent images to the rail.
+- **Vision models only**: if the side session's current route does not accept image input
+  (the model reports no `image` modality), the send is refused with a localized reason before
+  anything is appended. Switch the parent/route to a vision model and send again; nothing was
+  lost.
+- **History**: committed user bubbles render the images as thumbnails; clicking one opens the
+  full image. A stored object that has been deleted or corrupted renders a failed placeholder
+  instead of breaking the row. A pending (optimistic) row shows the same thumbnails and is
+  retired when the committed message with the same text and image ids arrives.
+- **Where the bytes live**: images are stored under the DSH home (`~/.dsh/attachments/v1`
+  with the local attachment backend) and served to the tab by the plugin's own read route,
+  which re-verifies the object on every read. DSH never deletes attachment objects, so an
+  image you remove before sending, or one lost with a closed tab, leaves an unreferenced
+  object on disk. It is harmless and not an error; nothing lists it.
+
+Image input needs the shipped attachment bundle (`@deepseek-ai/dsh-attachment-local`), which
+the default DSH composition mounts. A profile without it answers `unavailable` for uploads;
+text-only sending is unaffected.
 
 ## Localization
 
@@ -410,13 +482,15 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
 
 ## Compatibility
 
-- Verified target: DSH `0.2.1-rc.2`, Desktop profile, Web GUI. This release was verified
+- Verified target: DSH `0.2.2-rc.3` (Desktop profile, Web GUI). The core panel was verified
   against a real `dsh web` process in an isolated DSH home with a fresh `web` profile: the
   plugin launches, the pre-existing host routes answer (including the SSE route's JSON
   fallback), and the client bundle is served. The stream frame contract is covered by the
   host/client unit tests and an in-process end-to-end check over a real HTTP server. The
-  `@file` route added since that run is covered by host-route unit tests rather than a
-  real-process check.
+  `@` route (file/folder and session candidates) and the image upload/read routes are covered
+  by unit tests, with the combined `@` route and the raw image routes additionally framed over
+  an in-process real HTTP server; the session mention spelling was checked against the
+  installed build's own parser. None of these has been exercised in a real-process GUI.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -536,13 +610,29 @@ is about a dependency, not this plugin.
   poll granularity or on commit.
 - **History is not refreshed.** The snapshot is taken once per side chat, when that tab
   creates it.
-- **`@` completion needs the host file-reference provider.** Profiles that mount one (the
-  shipped web stack does) complete workspace paths; without it the menu stays hidden and
+- **`@` completion needs at least one host reference provider.** The shipped web stack mounts
+  both the file-reference and session-reference services, so both domains list; a profile
+  with only one mounted lists that domain only, and with neither the menu stays hidden and
   `@` text is sent unchanged. An `unavailable` answer is remembered for that tab, so a
-  transient provider failure hides the menu until the tab is reopened.
-- **Only file and folder references are completed.** `@session` references, `/` commands and
-  skills, attachments, and drag-and-drop are not implemented in the side-chat composer; they
-  belong to later phases.
+  transient failure hides the menu until the tab is reopened.
+- **Session references are prepared by DSH, not by this plugin.** The side chat inserts the
+  canonical mention and sends it; a build that does not mount the session-reference service
+  never lists sessions. A preparation failure terminates the side turn (the prompt was
+  already accepted), and the reference snapshot is read-only, budgeted and truncated by DSH
+  exactly as in the main session. Session discovery matches title/id/workspace only, and a
+  session-reference chip has no click action.
+- `/` commands and skills, and generic (non-image) file attachments, are not implemented in
+  the side-chat composer.
+- **Image input is images-only and needs a vision model.** Dropped or pasted non-image files
+  are ignored. A route whose model does not accept images refuses the send with a localized
+  reason (the draft and the images stay). Image handling reuses DSH's attachment provider, so
+  the deployment's limits and media types decide what is accepted.
+- **Removed or unsent images stay on disk.** DSH attachments are never deleted, so removing a
+  thumbnail, a failed send, or closing a tab after uploading leaves unreferenced objects under
+  the DSH home. They are never referenced by a session and appear in no list.
+- **The image rail is per tab and in-memory.** Closing the tab discards it; a host restart
+  loses the rail (and every side session), and a stale reference is refused with the
+  "image is no longer available" reason instead of being sent.
 - **P1b items are designed but not implemented:** model picker for the side session,
   side-session history across a GUI restart, approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the

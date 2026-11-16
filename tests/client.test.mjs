@@ -2698,19 +2698,22 @@ test('referenceMenuOf renders a listbox whose mousedown pick keeps textarea focu
   assert.equal(menu.props.role, 'listbox')
   assert.equal(menu.props['aria-label'], 'reference.menu')
   const rows = menu.children[0]
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].props.id, 'sc-ref-menu-main-1-option-0')
-  assert.equal(rows[0].props.role, 'option')
-  assert.equal(rows[0].props['aria-selected'], false)
-  assert.equal(rows[0].props.onClick, undefined, 'rows have no click handler; mousedown keeps focus')
-  assert.equal(rows[1].props.className, 'sc-ref-option sc-ref-option-active')
-  assert.equal(rows[1].props['aria-selected'], true)
-  assert.deepEqual(rows[0].children[1].children, ['a.js'])
-  assert.deepEqual(rows[0].children[2].children, ['lib/'], 'a row shows the parent directory that tells same-named paths apart')
-  assert.deepEqual(rows[1].children[1].children, ['lib/'])
-  assert.equal(rows[1].children[2], null, 'a top-level row carries no parent hint')
+  assert.equal(rows.length, 3)
+  assert.equal(rows[0].props.className, 'sc-ref-group')
+  assert.equal(rows[0].props.role, 'presentation')
+  assert.deepEqual(rows[0].children, ['reference.files'])
+  assert.equal(rows[1].props.id, 'sc-ref-menu-main-1-option-0')
+  assert.equal(rows[1].props.role, 'option')
+  assert.equal(rows[1].props['aria-selected'], false)
+  assert.equal(rows[1].props.onClick, undefined, 'rows have no click handler; mousedown keeps focus')
+  assert.equal(rows[2].props.className, 'sc-ref-option sc-ref-option-active')
+  assert.equal(rows[2].props['aria-selected'], true)
+  assert.deepEqual(rows[1].children[1].children, ['a.js'])
+  assert.deepEqual(rows[1].children[2].children, ['lib/'], 'a row shows the parent directory that tells same-named paths apart')
+  assert.deepEqual(rows[2].children[1].children, ['lib/'])
+  assert.equal(rows[2].children[2], null, 'a top-level row carries no parent hint')
   let prevented = 0
-  rows[1].props.onMouseDown({ preventDefault: () => { prevented += 1 } })
+  rows[2].props.onMouseDown({ preventDefault: () => { prevented += 1 } })
   assert.equal(prevented, 1)
   assert.deepEqual(picked, [1])
 
@@ -3022,7 +3025,7 @@ test('the panel renders the menu above the textarea and routes keys without subm
   assert.ok(composer !== undefined, 'the composer renders')
   assert.equal(composer.children[0].props.className, 'sc-ref-menu', 'the menu renders above the textarea')
   assert.equal(composer.children[0].props.role, 'listbox')
-  assert.equal(composer.children[0].props['aria-label'], '文件引用')
+  assert.equal(composer.children[0].props['aria-label'], '引用')
   const textarea = composer.children[1]
   assert.equal(textarea.props.className, 'sc-textarea')
   assert.equal(textarea.props['aria-expanded'], true)
@@ -3113,21 +3116,524 @@ test('committed user bubbles render file and folder references as inert chips', 
 
 test('reference copy is localized and the panel stylesheet ships the menu and chip styles', () => {
   const { exports } = loadBundle()
-  for (const key of ['reference.menu', 'reference.loading', 'reference.empty']) {
+  for (const key of ['reference.menu', 'reference.files', 'reference.sessions', 'reference.loading', 'reference.empty', 'reference.noCwd', 'reference.timeNow', 'reference.timeMinutes', 'reference.timeHours', 'reference.timeDays', 'reference.timeMonths', 'reference.timeYears']) {
     assert.equal(typeof exports.ZH_DICT[key], 'string')
     assert.equal(typeof exports.EN_DICT[key], 'string')
     assert.notEqual(exports.ZH_DICT[key].trim(), '')
     assert.notEqual(exports.EN_DICT[key].trim(), '')
   }
   assert.equal(exports.REFERENCE_DEBOUNCE_MS, 120)
-  for (const selector of ['.sc-ref-menu', '.sc-ref-option', '.sc-ref-status', '.sc-ref-chip', '.sc-ref-chip-dir']) {
+  for (const selector of ['.sc-ref-menu', '.sc-ref-option', '.sc-ref-group', '.sc-ref-status', '.sc-ref-chip', '.sc-ref-chip-dir', '.sc-ref-chip-session']) {
     assert.ok(exports.PANEL_CSS.includes(selector), `${selector} must ship in the panel stylesheet`)
   }
   const { registered, locale } = applyBundle(exports)
   const t = registered[0].options.inject('session-1').t
-  assert.equal(t('reference.loading'), '正在搜索文件…')
-  assert.equal(t('reference.empty'), '没有匹配的文件')
+  assert.equal(t('reference.loading'), '正在搜索…')
+  assert.equal(t('reference.empty'), '没有匹配的引用')
   locale.setLocale('en')
-  assert.equal(t('reference.loading'), 'Searching files…')
-  assert.equal(t('reference.empty'), 'No matching files')
+  assert.equal(t('reference.loading'), 'Searching…')
+  assert.equal(t('reference.empty'), 'No matching references')
+})
+
+/* ------------------------------------------------------------------ *
+ * P1a-2 `@session` references
+ * ------------------------------------------------------------------ */
+
+function sessionMention(sessionId, label) {
+  return `@[${label}](dsh-session:${Buffer.from(JSON.stringify(sessionId), 'utf8').toString('base64url')})`
+}
+
+test('referenceCandidatesOf accepts canonical session rows and rejects malformed ones', () => {
+  const { exports } = loadBundle()
+  const mention = sessionMention('session-1', 'Fix login')
+  assert.deepEqual(exports.referenceCandidatesOf([
+    { path: 'a.js', kind: 'file' },
+    { kind: 'session', label: 'Fix login', mention, location: '/other', createdAt: 42 },
+    { kind: 'session', label: 'No mention', mention: '@[x](dsh-session:!!)' },
+    { kind: 'session', label: '', mention },
+    { kind: 'session', label: 'Bad', mention: 'text' },
+    null,
+  ]), [
+    { path: 'a.js', kind: 'file' },
+    { kind: 'session', label: 'Fix login', mention, location: '/other', createdAt: 42 },
+  ])
+  assert.deepEqual(exports.referenceCandidatesOf([
+    { kind: 'session', label: 'No cwd', mention, location: null },
+    { kind: 'session', label: 'No age', mention },
+  ]), [
+    { kind: 'session', label: 'No cwd', mention, location: null },
+    { kind: 'session', label: 'No age', mention },
+  ])
+})
+
+test('referenceMenuOf groups files and sessions and describes a session row', () => {
+  const { exports } = loadBundle()
+  const mention = sessionMention('session-1', 'Fix login')
+  const now = 1_000_000_000_000
+  const t = (key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`)
+  const menu = exports.referenceMenuOf(t, {
+    status: 'ready',
+    token: { start: 0, query: '', quoted: false },
+    activeIndex: 1,
+    candidates: [
+      { path: 'lib/a.js', kind: 'file' },
+      { kind: 'session', label: 'Fix login', mention, location: '~/other', createdAt: now - 5 * 60_000 }
+    ]
+  }, 'm', null, now)
+  const rows = menu.children[0]
+  assert.equal(rows.length, 4)
+  assert.equal(rows[0].props.className, 'sc-ref-group')
+  assert.equal(rows[0].props.role, 'presentation')
+  assert.deepEqual(rows[0].children, ['reference.files'])
+  assert.deepEqual(rows[2].children, ['reference.sessions'])
+  assert.equal(rows[3].props['aria-selected'], true)
+  assert.equal(rows[3].props.title, 'Fix login')
+  assert.deepEqual(rows[3].children[0].children, ['◉'])
+  assert.deepEqual(rows[3].children[1].children, ['Fix login'])
+  assert.deepEqual(rows[3].children[2].children, ['~/other · reference.timeMinutes:{"n":5}'])
+})
+
+test('relativeReferenceAge mirrors the primary buckets and referenceDescriptionOf joins them', () => {
+  const { exports } = loadBundle()
+  const now = 1_000_000_000_000
+  const t = (key, params) => (params === undefined ? key : `${key}:${JSON.stringify(params)}`)
+  assert.equal(exports.relativeReferenceAge(now, now, t), 'reference.timeNow')
+  assert.equal(exports.relativeReferenceAge(now - 5 * 60_000, now, t), 'reference.timeMinutes:{"n":5}')
+  assert.equal(exports.relativeReferenceAge(now - 3 * 3_600_000, now, t), 'reference.timeHours:{"n":3}')
+  assert.equal(exports.relativeReferenceAge(now - 2 * 86_400_000, now, t), 'reference.timeDays:{"n":2}')
+  assert.equal(exports.relativeReferenceAge(now - 40 * 86_400_000, now, t), 'reference.timeMonths:{"n":1}')
+  assert.equal(exports.relativeReferenceAge(now - 400 * 86_400_000, now, t), 'reference.timeYears:{"n":1}')
+  assert.equal(exports.referenceDescriptionOf({ kind: 'session', createdAt: now - 60_000 }, t, now), 'reference.timeMinutes:{"n":1}')
+  assert.equal(exports.referenceDescriptionOf({ kind: 'session', location: null }, t, now), 'reference.noCwd')
+  assert.equal(exports.referenceDescriptionOf({ kind: 'session', location: '~/x', createdAt: now }, t, now), '~/x · reference.timeNow')
+  assert.equal(exports.referenceDescriptionOf({ path: 'lib/a.js', kind: 'file' }, t, now), 'lib/')
+})
+
+test('session tokens stay readable in the draft and expand to canonical mentions on send', () => {
+  const { exports } = loadBundle()
+  const m1 = sessionMention('session-1', 'A')
+  const m2 = sessionMention('session-2', 'A')
+  assert.equal(exports.formatSessionReferenceToken('A]B'), '@[A\\]B]')
+  assert.equal(exports.formatSessionReferenceToken('  '), undefined)
+  assert.equal(exports.formatSessionReferenceToken(''), undefined)
+  assert.equal(exports.expandSessionReferences('x @[A] y', [{ token: '@[A]', mention: m1 }]), `x ${m1} y`)
+  assert.equal(
+    exports.expandSessionReferences('@[A] and @[A]', [{ token: '@[A]', mention: m1 }, { token: '@[A]', mention: m2 }]),
+    `${m1} and ${m2}`
+  )
+  assert.equal(exports.expandSessionReferences('none', [{ token: '@[A]', mention: m1 }]), 'none')
+  assert.equal(exports.expandSessionReferences('@[A]', [{ token: '@[A]', mention: 'not-a-mention' }]), '@[A]')
+  assert.equal(exports.expandSessionReferences('@[A]', []), '@[A]')
+})
+
+test('activeAtToken treats a completed picked session token as inert', () => {
+  const { exports } = loadBundle()
+  const mention = sessionMention('session-1', 'Fix login')
+  assert.equal(exports.activeAtToken('see @[Fix login]', 16), undefined)
+  assert.equal(exports.activeAtToken('see @[Fix]x', 12), undefined)
+  assert.equal(exports.activeAtToken('see @[Fix', 10), undefined, 'editing inside a picked token opens no path menu')
+  assert.equal(exports.activeAtToken(`see ${mention}`, 4 + mention.length), undefined)
+  assert.deepEqual(exports.activeAtToken('see @li', 7), { prefix: '@li', query: 'li', quoted: false })
+})
+
+test('splitReferenceText recognizes canonical session mentions with escaped labels', () => {
+  const { exports } = loadBundle()
+  const mention = sessionMention('session-1', 'Fix login')
+  const escaped = sessionMention('session-1', 'a\\]b')
+  assert.deepEqual(exports.splitReferenceText(`see ${mention} and @lib/a.js`), [
+    { kind: 'text', text: 'see ' },
+    { kind: 'reference', referenceKind: 'session', label: 'Fix login', mention },
+    { kind: 'text', text: ' and ' },
+    { kind: 'reference', referenceKind: 'file', path: 'lib/a.js', label: 'a.js' }
+  ])
+  assert.deepEqual(exports.splitReferenceText(escaped), [
+    { kind: 'reference', referenceKind: 'session', label: 'a]b', mention: escaped }
+  ])
+  assert.deepEqual(exports.splitReferenceText('@[x](dsh-session:!!)'), [
+    { kind: 'text', text: '@[x](dsh-session:!!)' }
+  ], 'a malformed session mention is text, never a file chip')
+  assert.deepEqual(exports.splitReferenceText('@[Fix login]'), [
+    { kind: 'text', text: '@[Fix login]' }
+  ], 'an unexpanded readable token stays text')
+})
+
+test('referenceNodes renders a session chip with the mention as its title', () => {
+  const { exports } = loadBundle()
+  const mention = sessionMention('session-1', 'Fix login')
+  const nodes = exports.referenceNodes(`see ${mention}`)
+  assert.equal(nodes[0], 'see ')
+  assert.equal(nodes[1].props.className, 'sc-ref-chip sc-ref-chip-session')
+  assert.equal(nodes[1].props.title, mention)
+  assert.deepEqual(nodes[1].children, ['Fix login'])
+})
+
+test('a session pick records the canonical mention and send expands it', async () => {
+  const mention = sessionMention('session-1', 'Fix login')
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [] },
+    references: { ok: true, candidates: [{ kind: 'session', label: 'Fix login', mention, createdAt: 10 }] }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', 'see @Fix', 8)
+  scheduler.runAll()
+  await flush()
+  runtime.pickReference('main-1', 0)
+  let state = runtime.getState('main-1')
+  assert.equal(state.draft, 'see @[Fix login]')
+  assert.equal(state.composerCaret, 16)
+  assert.deepEqual(state.sessionRefs, [{ token: '@[Fix login]', mention }])
+  assert.equal(state.reference.status, 'closed')
+
+  await runtime.send('main-1')
+  const promptCalls = fetchStub.calls.filter((call) => call.url === `${API_PREFIX}prompt`)
+  assert.equal(promptCalls.length, 1)
+  assert.equal(promptCalls[0].body.text, `see ${mention}`)
+  state = runtime.getState('main-1')
+  assert.deepEqual(state.sessionRefs, [])
+  await runtime.close('main-1')
+})
+
+test('a failed send keeps the readable draft and the recorded session references', async () => {
+  const mention = sessionMention('session-1', 'Fix login')
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: false, code: 'prompt-failed', message: 'nope' },
+    references: { ok: true, candidates: [{ kind: 'session', label: 'Fix login', mention, createdAt: 10 }] }
+  })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', 'see @Fix', 8)
+  scheduler.runAll()
+  await flush()
+  runtime.pickReference('main-1', 0)
+  await runtime.send('main-1')
+  const state = runtime.getState('main-1')
+  assert.equal(state.draft, 'see @[Fix login]')
+  assert.deepEqual(state.sessionRefs, [{ token: '@[Fix login]', mention }])
+  assert.equal(state.error.code, 'prompt-failed')
+  await runtime.close('main-1')
+})
+
+test('a quoted reference lookup asks the host to skip sessions', async () => {
+  const fetchStub = createFetchStub({ references: { ok: true, candidates: [] } })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  runtime.composeDraft('main-1', '@"li', 4)
+  scheduler.runAll()
+  await flush()
+  const call = fetchStub.calls.filter((entry) => entry.url === `${API_PREFIX}references`).at(-1)
+  assert.deepEqual(call.body, { query: 'li', quoted: true, sourceId: 'main-1' })
+  await runtime.close('main-1')
+})
+
+/* ------------------------------------------------------------------ *
+ * Image input (P1b-1)
+ * ------------------------------------------------------------------ */
+
+function makeImageFile(name = 'shot.png', type = 'image/png') {
+  return new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])], name, { type })
+}
+
+const IMAGE_ID = `sha256:${'a'.repeat(64)}`
+const IMAGE_REF = { attachmentId: IMAGE_ID, mediaType: 'image/png', width: 2, height: 2, bytes: 8 }
+
+/**
+ * Fetch stub that answers the binary upload route plus the JSON routes; image
+ * responses are switchable so tests can fail an upload and retry it.
+ */
+function imageFetchStub(handlers = {}) {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    const path = url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url
+    const name = path.split('?')[0]
+    if (name === 'attachment') {
+      calls.push({ name, url, init })
+      const answer = typeof handlers.attachment === 'function' ? handlers.attachment(init) : handlers.attachment
+      const payload = answer === undefined ? { ok: true, attachment: { ...IMAGE_REF } } : answer
+      return { ok: true, status: 200, json: async () => payload }
+    }
+    const body = init === undefined || init.body === undefined ? {} : JSON.parse(init.body)
+    calls.push({ name, url, body, init })
+    const handler = handlers[name]
+    const payload = typeof handler === 'function' ? handler(body) : handler === undefined ? { ok: true } : handler
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  return { fetchImpl, calls }
+}
+
+test('image helpers normalize references, build the read URL and read image files', () => {
+  const { exports } = loadBundle()
+  assert.deepEqual(exports.imageRefOf(IMAGE_REF), IMAGE_REF)
+  assert.deepEqual(exports.imageRefOf({ ...IMAGE_REF, name: ' shot.png ' }), { ...IMAGE_REF, name: 'shot.png' })
+  assert.equal(exports.imageRefOf({ ...IMAGE_REF, attachmentId: 'sha256:abc' }), undefined)
+  assert.equal(exports.imageRefOf({ ...IMAGE_REF, width: 0 }), undefined)
+  assert.deepEqual(exports.imageRefsOfContent([
+    { type: 'text', text: 'hi' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'image', attachment: { attachmentId: 'bad' } }
+  ]), [IMAGE_REF])
+  const expectedUrl = `${API_PREFIX}image?sessionId=side-1&attachmentId=${encodeURIComponent(IMAGE_ID)}&mediaType=image%2Fpng&width=2&height=2&bytes=8`
+  assert.equal(exports.imageUrlOf('side-1', IMAGE_REF), expectedUrl)
+  assert.equal(exports.isImageMediaType('image/png'), true)
+  assert.equal(exports.isImageMediaType('text/plain'), false)
+  assert.equal(exports.imageReasonKey('TOO_MANY_IMAGES'), 'image.reason.TOO_MANY_IMAGES')
+  assert.equal(exports.imageReasonKey('SOMETHING_ELSE'), 'image.reason.unknown')
+
+  const png = makeImageFile()
+  const txt = new File(['hello'], 'notes.txt', { type: 'text/plain' })
+  assert.deepEqual(exports.imageFilesOf({ files: [png, txt] }), [png])
+  assert.deepEqual(exports.imageFilesOf({ items: [{ kind: 'file', getAsFile: () => png }, { kind: 'string' }] }), [png])
+  assert.deepEqual(exports.imageFilesOf({ files: [txt] }), [])
+  assert.deepEqual(exports.imageFilesOf(null), [])
+})
+
+test('foldEntries carries committed images and keeps image-only user messages', () => {
+  const { exports } = loadBundle()
+  const events = [
+    {
+      seq: 1,
+      type: 'user/message',
+      time: 1,
+      surfaceOp: 'append',
+      data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'image', attachment: IMAGE_REF }] }
+    },
+    {
+      seq: 2,
+      type: 'user/message',
+      time: 2,
+      surfaceOp: 'append',
+      data: { id: 'u2', source: { kind: 'user' }, content: [{ type: 'text', text: 'look' }, { type: 'image', attachment: IMAGE_REF }] }
+    }
+  ]
+  const nodes = exports.foldEntries(events, 0)
+  assert.equal(nodes.length, 2)
+  assert.deepEqual(nodes[0], { kind: 'user', seq: 1, time: 1, text: '', images: [IMAGE_REF] })
+  assert.deepEqual(nodes[1].images, [IMAGE_REF])
+  assert.equal(nodes[1].text, 'look')
+})
+
+test('the composer uploads an added image and sends its reference with an empty text', async () => {
+  const stub = imageFetchStub({ create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 } })
+  const { runtime, scheduler } = createRuntimeWith(stub)
+  runtime.open('main-1')
+  runtime.addImages('main-1', [makeImageFile()])
+  await flush()
+  const afterUpload = runtime.getState('main-1')
+  assert.equal(afterUpload.images.length, 1)
+  assert.equal(afterUpload.images[0].status, 'ready')
+  assert.deepEqual(afterUpload.images[0].ref, IMAGE_REF)
+  const upload = stub.calls.find((call) => call.name === 'attachment')
+  assert.match(upload.url, /sourceId=main-1/)
+  assert.match(upload.url, /mime=image%2Fpng/)
+  assert.match(upload.url, /name=shot.png/)
+  assert.equal(upload.init.method, 'POST')
+
+  await runtime.send('main-1', '')
+  const prompt = stub.calls.find((call) => call.name === 'prompt')
+  assert.ok(prompt !== undefined, 'an image-only message is sent')
+  assert.deepEqual(prompt.body, { sessionId: 'side-1', text: '', attachments: [IMAGE_ID] })
+  const afterSend = runtime.getState('main-1')
+  assert.equal(afterSend.images.length, 0, 'sent images leave the rail')
+  assert.equal(afterSend.pending.length, 1)
+  assert.deepEqual(afterSend.pending[0].images.map((image) => image.attachmentId), [IMAGE_ID])
+  scheduler.runAll()
+})
+
+test('a removed image never reaches the prompt and an empty send is still refused', async () => {
+  const stub = imageFetchStub()
+  const { runtime } = createRuntimeWith(stub)
+  runtime.open('main-1')
+  runtime.addImages('main-1', [makeImageFile()])
+  await flush()
+  const key = runtime.getState('main-1').images[0].key
+  runtime.removeImage('main-1', key)
+  assert.equal(runtime.getState('main-1').images.length, 0)
+  await runtime.send('main-1', '   ')
+  assert.equal(stub.calls.filter((call) => call.name === 'prompt').length, 0, 'no text and no image sends nothing')
+})
+
+test('a failed upload reports its reason and can be retried', async () => {
+  const handlers = {
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    attachment: { ok: false, code: 'attachment-rejected', reason: 'IMAGE_TOO_LARGE', message: 'too large' }
+  }
+  const stub = imageFetchStub(handlers)
+  const { runtime } = createRuntimeWith(stub)
+  runtime.open('main-1')
+  runtime.addImages('main-1', [makeImageFile()])
+  await flush()
+  const failed = runtime.getState('main-1').images[0]
+  assert.equal(failed.status, 'error')
+  assert.equal(failed.error.reason, 'IMAGE_TOO_LARGE')
+  await runtime.send('main-1', 'text only')
+  assert.equal(stub.calls.filter((call) => call.name === 'prompt').length, 1, 'failed images do not block a text send')
+  assert.equal(runtime.getState('main-1').images.length, 1, 'the failed image stays in the rail')
+  assert.equal(runtime.getState('main-1').pending[0].images.length, 0)
+
+  handlers.attachment = { ok: true, attachment: { ...IMAGE_REF } }
+  runtime.retryImage('main-1', failed.key)
+  await flush()
+  assert.equal(runtime.getState('main-1').images[0].status, 'ready')
+})
+
+test('a refused send keeps its draft and restores the rail images', async () => {
+  const stub = imageFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: false, code: 'attachment-rejected', reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES', message: 'model refuses images' }
+  })
+  const { runtime } = createRuntimeWith(stub)
+  runtime.open('main-1')
+  runtime.addImages('main-1', [makeImageFile()])
+  await flush()
+  await runtime.send('main-1', 'explain')
+  const state = runtime.getState('main-1')
+  assert.equal(state.pending.length, 0)
+  assert.equal(state.images.length, 1, 'the image returns to the rail for a retry')
+  assert.equal(state.draft, 'explain')
+  assert.equal(state.error.code, 'attachment-rejected')
+  assert.equal(state.error.reason, 'MODEL_DOES_NOT_SUPPORT_IMAGES')
+})
+
+test('the committed echo retires a pending row only when its image ids match', async () => {
+  const snapshot = { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [], live: null }
+  const stub = imageFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    snapshot
+  })
+  const { runtime } = createRuntimeWith(stub)
+  runtime.open('main-1')
+  runtime.addImages('main-1', [makeImageFile()])
+  await flush()
+  await runtime.send('main-1', '')
+  assert.equal(runtime.getState('main-1').pending.length, 1)
+
+  const textOnlyEcho = {
+    seq: 1,
+    type: 'user/message',
+    time: 1700000001000,
+    surfaceOp: 'append',
+    data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '' }] }
+  }
+  snapshot.entries = [textOnlyEcho]
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').pending.length, 1, 'a text-only echo does not retire an image pending row')
+
+  const imageEcho = {
+    seq: 2,
+    type: 'user/message',
+    time: 1700000001000,
+    surfaceOp: 'append',
+    data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'image', attachment: IMAGE_REF }] }
+  }
+  snapshot.entries = [imageEcho]
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').pending.length, 0, 'the matching echo retires the pending row')
+})
+
+test('the reason copy localizes attachment rejections and falls back', () => {
+  const { exports, react } = loadBundle()
+  const t = (key) => (key.startsWith('image.reason.') ? `copy:${key}` : key)
+  const formatError = exports.formatError
+  assert.deepEqual(formatError(t, { code: 'attachment-rejected', reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES', message: 'detail' }), {
+    title: 'copy:image.reason.MODEL_DOES_NOT_SUPPORT_IMAGES',
+    detail: 'detail'
+  })
+  assert.equal(formatError(t, { code: 'attachment-rejected', reason: 'UNKNOWN_CODE' }).title, 'copy:image.reason.unknown')
+  assert.equal(formatError(t, { code: 'prompt-failed' }).title, 'error.promptFailed')
+  void react
+})
+
+test('the panel renders the composer rail, the picker and image thumbs', () => {
+  const { bodyRegistration } = panelRenderer()
+  const calls = []
+  const state = panelState({
+    sessionId: 'side-1',
+    nodes: [{
+      kind: 'user',
+      seq: 1,
+      time: 1700000001000,
+      text: '',
+      images: [IMAGE_REF]
+    }],
+    images: [{
+      key: 'img-1',
+      name: 'shot.png',
+      mediaType: 'image/png',
+      previewUrl: 'blob:preview-1',
+      status: 'ready',
+      error: null,
+      file: null,
+      ref: IMAGE_REF
+    }]
+  })
+  const props = bodyRegistration.options.inject('session-1')
+  const runtime = { ...panelRuntime(state, calls), addImages: (id, files) => calls.push(['addImages', files]) }
+  const bodyElement = bodyRegistration.component({
+    runtime,
+    sessionId: 'main-1',
+    t: props.t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const tree = bodyElement.type(bodyElement.props)
+  const rail = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-image-rail')
+  assert.ok(rail !== undefined, 'the rail renders above the textarea')
+  const railItem = findElement(rail, (element) => typeof element.type === 'function' && element.props.image !== undefined)
+  assert.ok(railItem !== undefined, 'the rail renders one item per image')
+  const railTree = railItem.type(railItem.props)
+  const railThumb = findElement(railTree, (element) => element.props !== undefined && element.props.className === 'sc-image-thumb')
+  assert.equal(railThumb.props.src, 'blob:preview-1')
+
+  const attach = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-attach')
+  assert.ok(attach !== undefined, 'the picker button renders')
+  assert.equal(attach.props['aria-label'], '添加图片')
+  const input = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-file-input')
+  assert.equal(input.props.type, 'file')
+  assert.equal(input.props.accept, 'image/png,image/jpeg,image/webp,image/gif')
+  assert.equal(input.props.multiple, true)
+
+  const body = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-body')
+  const userRow = body.children[0][0]
+  const userTree = userRow.type(userRow.props)
+  const thumbElement = findElement(userTree, (element) => typeof element.type === 'function' && element.props.image !== undefined)
+  assert.ok(thumbElement !== undefined, 'the committed bubble renders an image element')
+  const thumbTree = thumbElement.type(thumbElement.props)
+  const thumbAnchor = findElement(thumbTree, (element) => element.props !== undefined && element.props.className === 'sc-image-link')
+  assert.ok(thumbAnchor !== undefined, 'the committed bubble renders an image served by the read route')
+  const thumb = findElement(thumbTree, (element) => element.props !== undefined && element.props.className === 'sc-image-thumb')
+  assert.match(thumb.props.src, new RegExp(encodeURIComponent(IMAGE_ID).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+
+  const textarea = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-textarea')
+  const file = makeImageFile()
+  textarea.props.onPaste({ clipboardData: { files: [file] } })
+  assert.equal(calls.filter((call) => call[0] === 'addImages').length, 1)
+  const composer = composerOf(tree)
+  composer.props.onDrop({ dataTransfer: { files: [file] }, preventDefault: () => {} })
+  assert.equal(calls.filter((call) => call[0] === 'addImages').length, 2)
+  composer.props.onDragOver({ dataTransfer: { files: [makeImageFile()] }, preventDefault: () => {} })
+})
+
+test('the composer allows sending with a ready image and no text', () => {
+  const { bodyRegistration } = panelRenderer()
+  const state = panelState({
+    sessionId: 'side-1',
+    images: [{ key: 'img-1', name: 'a.png', mediaType: 'image/png', previewUrl: undefined, status: 'ready', error: null, file: null, ref: IMAGE_REF }]
+  })
+  const props = bodyRegistration.options.inject('session-1')
+  const bodyElement = bodyRegistration.component({
+    runtime: panelRuntime(state),
+    sessionId: 'main-1',
+    t: props.t,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const tree = bodyElement.type(bodyElement.props)
+  const send = findElement(tree, (element) => element.props !== undefined && typeof element.props.className === 'string' && element.props.className.startsWith('sc-send'))
+  assert.equal(send.props.disabled, false)
+  assert.equal(send.props['aria-label'], '发送')
+  assert.equal(send.props.className, 'sc-send')
 })

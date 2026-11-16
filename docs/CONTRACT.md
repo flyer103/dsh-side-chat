@@ -18,16 +18,19 @@ never share imports — only these routes.
 
 ## Host → JSON routes (registered on `ctx.webServer`, all `POST`, JSON in / JSON out)
 
+The two byte routes below (image upload and image read) are the only exceptions: they carry
+raw bytes instead of JSON.
+
 | path | request | response |
 |---|---|---|
 | `/side-chat/api/create` | `{ sourceId, instanceKey? }` | `{ ok: true, sessionId, inheritedEventCount }` \| `{ ok: false, code, message }` |
-| `/side-chat/api/prompt` | `{ sessionId, text }` | `{ ok: true }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/prompt` | `{ sessionId, text, attachments? }` | `{ ok: true }` \| `{ ok: false, code, message, reason? }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
-| `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement }], lastError }` \| `{ ok: false, code }` |
+| `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement, images? }], lastError }` \| `{ ok: false, code }` |
 | `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
 | `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |
-| `/side-chat/api/references` | `{ sourceId?, sessionId?, query }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' }] }` \| `{ ok: false, code, message? }` |
+| `/side-chat/api/references` | `{ sourceId?, sessionId?, query, quoted? }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' } \| { kind: 'session', sessionId, label, mention, location?: string \| null, createdAt }] }` \| `{ ok: false, code, message? }` |
 
 `snapshot` and the live stream below are the client's message sources. `entries` are
 committed session events whose `seq >= max(inheritedEventCount, fromSeq ?? inheritedEventCount)`,
@@ -40,17 +43,31 @@ A parent session may own several side sessions (one per `instanceKey`), so `list
 multiple entries with the same `sourceId`; each side session is still addressed by its own
 `sessionId`.
 
-`references` is the composer's `@file` lookup: one of `sessionId` / `sourceId` must resolve,
+`references` is the composer's `@` lookup: one of `sessionId` / `sourceId` must resolve,
 and `sessionId` wins. A `sessionId` must name a side session this plugin created
 (`not-found` otherwise); `sourceId` must name a live parent agent (`unknown-source`
 otherwise) and covers the window before the first message creates the side session. The
 addressed agent's working directory bounds discovery, `query` is the text after `@` passed
-through unchanged (string, at most 512 characters, `bad-request` otherwise), and only path
-candidates are returned — no file content, no reading or attaching. The provider
-(`ctx.fileReferences`) is optional: absent or failing answers `unavailable`, and the client
-then hides the menu for that tab. The route keeps no cache and no durable state; a client
-disconnect aborts the provider lookup (which is why it reads its own request body rather
-than going through the shared JSON handler) and gets no response.
+through unchanged (string, at most 512 characters, `bad-request` otherwise), and `quoted`
+(default false) marks an open quoted path, for which session discovery is skipped.
+
+Two optional providers feed the list: `ctx.fileReferences` for file/directory rows and
+`ctx.sessionReferenceResolver` for session rows. Both are optional and independent: a domain
+that is not mounted, or whose lookup throws, contributes no rows (the failure is logged);
+`unavailable` is answered only when neither provider is mounted, or when every attempted
+lookup failed, and the client then hides the menu for that tab. File rows come first, then
+session rows in resolver rank order.
+
+A session row carries the resolver's display title (`label`, falling back to the resolver's
+`label`), the host-generated canonical prompt mention, a home-abbreviated `location` (omitted
+when the session shares the addressed agent's workspace, `null` when it records no cwd) and
+the session creation time in epoch milliseconds. `mention` is
+`@[label](dsh-session:<base64url(JSON.stringify(sessionId))>)`, with `\` and `]` escaped in
+the label, control characters collapsed to spaces, and the session id as the label when no
+title survives. This is the spelling DSH's own session reference service parses. The route reads no
+file content and no session log: it lists names, workspaces and ages only. It keeps no cache
+and no durable state; a client disconnect aborts both lookups (which is why it reads its own
+request body rather than going through the shared JSON handler) and gets no response.
 
 `contextWindow` is an optional, additive field on `snapshot` and on the stream's `hello`
 frame: the side session's current route capacity as a positive number, omitted when no
@@ -61,8 +78,59 @@ it, and a client that does not receive it simply omits the context reading inste
 guessing. A later own `request/context` entry (for example after a model switch) takes
 precedence over the baseline.
 
+`prompt` accepts an optional `attachments` array of durable image reference ids
+(`'sha256:<64 hex>'`) created by the upload route below, in message order. `text` may be
+empty exactly when `attachments` is non-empty; `empty-prompt` still covers the no-text,
+no-image case. The host resolves each id through its own upload staging record — the record
+keeps the reference the provider returned, so the wire cannot substitute a different
+reference — re-admits the batch through `ctx.attachments.admitPromptContent()` (which applies
+the provider's count and aggregate-byte limits), and appends one user message whose content
+is the text block (when non-empty) followed by the image blocks. An id the staging record no
+longer knows (for example after a host restart) is refused with `reason:
+'ATTACHMENT_NOT_FOUND'` rather than sent. Deployment image limits (count per message,
+per-image and aggregate bytes, pixels, media types) belong to the mounted attachment provider
+and are never restated or hardcoded here. A route whose model reports `inputModalities`
+without `image` is refused before the append with `reason:
+'MODEL_DOES_NOT_SUPPORT_IMAGES'`.
+
 Error codes: `unknown-source`, `not-found`, `empty-prompt`, `create-failed`,
-`prompt-failed`, `dispose-failed`, `bad-request`, `unavailable`, `internal`.
+`prompt-failed`, `dispose-failed`, `bad-request`, `unavailable`, `internal`,
+`attachment-rejected`. `attachment-rejected` carries `reason`: the attachment provider's
+stable code (`UNSUPPORTED_IMAGE_TYPE`, `IMAGE_TOO_LARGE`, `IMAGE_TOO_MANY_PIXELS`,
+`IMAGE_DIMENSION_TOO_LARGE`, `IMAGE_TYPE_MISMATCH`, `INVALID_IMAGE`, `TOO_MANY_IMAGES`,
+`IMAGES_TOO_LARGE`, `ATTACHMENT_NOT_FOUND`, `ATTACHMENT_CORRUPT`, `ATTACHMENT_WRITE_FAILED`,
+…) or `MODEL_DOES_NOT_SUPPORT_IMAGES`; unrecognized reasons fall back to `message`.
+
+### Image upload and serving
+
+Two routes carry image bytes and therefore bypass the JSON handler:
+
+| path | request | response |
+|---|---|---|
+| `POST /side-chat/api/attachment` | raw image bytes as the body; query `sourceId?`, `sessionId?`, `mime`, `name?` | `{ ok: true, attachment: { attachmentId, mediaType, width, height, bytes, name? } }` \| `{ ok: false, code, message?, reason? }` |
+| `GET /side-chat/api/image` | query `sessionId`, `attachmentId`, `mediaType`, `width`, `height`, `bytes` | the stored image bytes with `Content-Type: <mediaType>`; `404` with no JSON envelope on any failure |
+
+- **Identity.** `sessionId` must name a side session this plugin created and wins when both
+  are sent; `sourceId` must name a live parent agent and covers the window before the first
+  message creates the side session. Neither present or unresolvable → `bad-request` /
+  `not-found` / `unknown-source`. Same-origin only, like every other route: there are no auth
+  headers.
+- **Upload.** `mime` must be one of `ctx.attachments.imageLimits.mediaTypes`
+  (`UNSUPPORTED_IMAGE_TYPE` otherwise); the raw body is capped at the provider's
+  `maxImageBytes`, and a larger body is refused as `IMAGE_TOO_LARGE` without being stored.
+  The bytes are committed through
+  `ctx.attachments.saveImages([{ data, mediaType, name }])`, and the route records the
+  returned reference as the staging entry whose `bytes` are the stored object's byte length.
+  `ctx.attachments` absent → `unavailable`; every provider failure maps to
+  `attachment-rejected` with its `reason`.
+- **Serving.** The image route serves only an attachment that a user message of the addressed
+  side session actually references; the host reads it through
+  `ctx.attachments.readImage(ref)`, which re-verifies digest, length, format and dimensions.
+  Bytes are served with the reference media type and a long, immutable cache header, so a
+  thumbnail and its full-size click share one cached response.
+- **Sessions and lifetime.** Attachments are never deleted by DSH. An upload that is removed
+  from the composer, never sent, or lost with a closed tab leaves an unreferenced stored
+  object; that is harmless and documented, not an error.
 
 `create` is idempotent per identity: the opaque `instanceKey` when a non-empty one is sent,
 otherwise the legacy identity `source:<sourceId>`. A repeated call for the same identity
@@ -125,6 +193,12 @@ lookup per tab is in flight. The host observes the disconnect and cancels the pr
 an aborted answer is never rendered. `sessionId` is sent only once the tab's side session
 exists; before that the request carries `sourceId`.
 
+Two routes carry raw bytes instead of JSON: the image upload posts the file itself as the
+body (`Content-Type` from the file, query carries the identity, `mime` and `name`) and
+answers JSON, while the image read is a plain `GET` consumed by `<img>` (`Content-Type` is the
+stored media type, a long immutable cache header, `404` without a JSON body on failure). No
+auth headers on either; same-origin only, like every other route.
+
 ## Client integration (right Sidebar tab, no standalone button)
 
 The side chat is a native tab type of the right Sidebar, opened from that column's guide
@@ -170,10 +244,12 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   The tab status bar carries a new-side-chat button (locale key `tab.new`) that opens
   another side-chat tab in the same pane. Neither depends on a side session existing:
   opening a tab does no host work.
-- Fold `entries` into rows with pure functions: `user/message` (`data.source` / `data.content`),
+- Fold `entries` into rows with pure functions: `user/message` (`data.source` / `data.content`,
+  including `{ type: 'image', attachment }` blocks → the row's `images` list),
   `assistant/message` (`data.message.content` blocks: `text`, `reasoning`, `tool-call`),
   `tool/call`, `tool/result` (`data.message.source.callId`, `content`, `isError`), plus small
-  tags for `context` / `steering`. Unknown event types are ignored, never thrown on.
+  tags for `context` / `steering`. Unknown event types are ignored, never thrown on. A
+  user message with no text still renders when it carries at least one image.
 - Hide rows below the fork floor (`seq < inheritedEventCount`) and the injected boundary
   message (`source.kind === 'plugin:side-chat'`, or text starting with
   `Side conversation boundary.`).
@@ -188,6 +264,11 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress.
+- Composer images: paste, drop and the picker add thumbnails to a rail above the textarea;
+  each uploads immediately and carries `uploading` / `ready` / `error`; the send button is
+  enabled with a ready image even when the text is empty. A pending row carries the same
+  thumbnails (local object URLs); it reconciles against the committed message by text **and**
+  attachment-id list, not text alone.
 - Assistant bodies render through the shell's `MarkdownText` (GFM: tables, task lists, code
   fences, footnotes, KaTeX; raw HTML stays literal text). The seed module exports it as a
   `React.memo` component, so detection accepts a component object (`$$typeof`), not only a
@@ -199,7 +280,7 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   literal pipe inside a table cell, and pads/truncates every row to the header's column
   count.
 
-### Reference completion (`@file`)
+### Reference completion (`@`)
 
 - The bundle cannot import `@deepseek-ai/dsh-file-reference`; it replicates the browser-safe
   `activeAtToken` / `formatFileMention` grammar locally, with the same prompt spellings:
@@ -207,21 +288,58 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Typing `@` at input start or after whitespace opens a menu at the top of the composer card
   (above the textarea), filled from
   `POST /side-chat/api/references` (120 ms debounce, one in-flight request per tab, previous
-  request aborted, stale answers dropped). No query is sent while composing, and no menu
-  opens when the provider reported `unavailable` (cached for that tab).
+  request aborted, stale answers dropped). The request carries `quoted: true` for an open
+  quoted path so the host skips session discovery. No query is sent while composing, and no
+  menu opens when the route reported `unavailable` (cached for that tab).
 - The menu is a listbox inside the composer card (no portal): `role="listbox"` with rows
-  `role="option"` (kind glyph, basename — directories keep the trailing slash — and, when the
-  path has one, its parent directory to tell same-named entries apart), the textarea is a
-  `combobox` with `aria-expanded`, `aria-controls` and
+  `role="option"`, the textarea is a `combobox` with `aria-expanded`, `aria-controls` and
   `aria-activedescendant`; Up/Down wrap, Enter/Tab pick the highlighted row, Escape closes,
   blurring the composer closes, mousedown picks without stealing focus. A pick replaces
   `[token start, caret]` and moves the caret after the mention; a directory pick keeps
   completion open on the new query. With nothing to pick, Enter closes the menu and submits.
-- The pick never sends and never reads file content; the mention is plain prompt text.
+- Rows are grouped by domain with non-option headers (`reference.files` before file/directory
+  rows, `reference.sessions` before session rows, whichever groups are present): a file row
+  shows a kind glyph, its basename and its parent directory when it has one; a session row
+  shows the title and a `location · age` description (the primary's relative-time buckets,
+  `reference.noCwd` when the candidate records no cwd).
+- A file pick inserts the primary's prompt spelling and remains plain prompt text. A session
+  pick inserts the readable `@[title]` token (escaped `\` / `]`) and records
+  `{ token, mention }` in the per-tab reference list; `send` expands each recorded token to
+  the host-returned canonical `@[title](dsh-session:…)` mention (first exact occurrence;
+  duplicates consume successive occurrences) and sends that. A token edited or deleted before
+  sending is skipped, so no reference is invented. The pending row shows the expanded text.
 - Committed user bubbles split their text with the primary reference rule (quoted paths
-  preserved, trailing sentence punctuation trimmed) and render file/folder references as
-  inert `sc-ref-chip` text nodes (no click, no HTML injection); directory labels keep the
-  trailing slash.
+  preserved, trailing sentence punctuation trimmed, canonical session mentions with escaped
+  labels), render file/folder/session references as inert `sc-ref-chip` text nodes (no click,
+  no HTML injection), and keep the trailing slash on directory labels. A malformed session
+  mention is treated as text, never as a chip or an inserted reference.
+
+### Image input (composer rail)
+
+- Three channels feed one per-tab rail: `paste` (clipboard items with `kind === 'file'` whose
+  type is `image/png`, `image/jpeg`, `image/webp` or `image/gif`), `drop`/`dragover` on the
+  composer card (files only), and a hidden `<input type="file" accept="image/*" multiple>` run
+  by a paperclip button in the actions row. A drop that carries any file is accepted so the
+  page never navigates to it, but only image files reach the rail; other files are ignored and
+  nothing is uploaded for them.
+- Each accepted file is uploaded immediately with
+  `fetch('/side-chat/api/attachment?…', { method: 'POST', body: file })`; the rail shows the
+  local object URL at once, then `uploading → ready` (or `error` with the mapped reason).
+  Removing a thumbnail revokes its object URL; a failed file can be retried (re-uploaded) or
+  removed. Uploads never block typing, the `@` menu, IME composition, or `Enter`.
+- The rail is per tab and per panel runtime record: another tab never sees these files, and
+  closing the tab discards them (the stored objects may remain unreferenced; see the upload
+  route).
+- Sending posts `attachments` as reference ids only. The draft and the rail survive a send
+  failure. `pending` rows render the same thumbnails and reconcile against the committed
+  message by text **and** attachment-id list.
+- Thumbnails in committed user bubbles are `<img>` elements pointing at
+  `GET /side-chat/api/image?…` with the reference fields as query parameters (no fetch, no
+  base64 in the client state); a non-200 response swaps in a failed placeholder. Clicking a
+  thumbnail opens the full image in a new tab. Object URLs are revoked when the tab closes.
+- Queue rows from `status` gain an additive `images` count; an image-only queued prompt is
+  projected with `text: ''` and `images > 0` instead of being dropped from the wire. The
+  panel's own queue surface stays the pending-row count; it does not render those rows today.
 
 ### Usage dock (bottom row)
 
@@ -289,7 +407,15 @@ Performance & usage detailed/compact preference.
   placeholder, send/stop labels, thinking indicator, reasoning/tool fold titles,
   pending-message state, context and steering tags, the usage dock, and error text keyed by
   host error code. The `@` menu adds `reference.menu` (listbox aria), `reference.loading` and
-  `reference.empty` (status rows).
+  `reference.empty` (status rows), the group headers `reference.files` / `reference.sessions`,
+  the session-row description keys `reference.noCwd` and `reference.timeNow` /
+  `reference.timeMinutes` / `reference.timeHours` / `reference.timeDays` /
+  `reference.timeMonths` / `reference.timeYears` (the primary's relative-time buckets). The
+  image rail adds `image.add` (picker button), `image.dropHint`, `image.uploading`,
+  `image.failed`, `image.remove`, `image.retry`, `image.queueLabel` (image-only queued or
+  pending row), and one key per known `attachment-rejected` reason
+  (`image.reason.<CODE>`), with `image.reason.unknown` as the fallback that shows the host
+  message.
 - Dock keys, in the same namespace: `dock.tokens` (compact total), `dock.cacheHit`
   (percentage), `dock.contextAria` (accessible percentage), `dock.contextTitle` (approximate
   `~used / window`), `dock.usageTitle` (exact bucket counts), `dock.usageTitleWithWrite`
