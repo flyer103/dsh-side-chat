@@ -101,6 +101,17 @@ README feature bullets must not restate semantic details that belong to USAGE/CO
   provider call when the client disconnects (the reference route reads its own request body for
   that reason).
 
+## Markdown rendering
+
+- Assistant bodies stay on the shell's `MarkdownText`; do not fork it to add chrome. Copy
+  controls for tables are appended *into* the renderer's own DOM (`button.sc-copy-chip` as the
+  last child of the table's scroll container, `sc-copy-host` added to that container) by
+  `decorateCopyChips` + a per-row `MutationObserver`. Never wrap, move or re-parent a
+  React-managed node from the decorator: React removes/reorders by its recorded DOM parent and
+  will throw if the parent changed. Absolute positioning keeps DOM order irrelevant, chips are
+  reused by class (idempotent under stream re-renders), and readers re-resolve the live node at
+  click time so a replaced table or a locale switch cannot serve a stale payload or label.
+
 ## Release
 
 Only when the user explicitly asks: feature commit(s) first (code + tests + docs), then a

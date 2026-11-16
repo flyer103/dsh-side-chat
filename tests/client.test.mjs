@@ -1189,7 +1189,9 @@ test('fallback markdown covers code fences, headings, lists, tables and inline m
   assert.ok(types.includes('div'), 'heading/paragraph blocks are divs')
   assert.ok(types.includes('pre'), 'code fence renders a pre block')
   assert.ok(types.includes('ul'), 'unordered list renders a ul')
-  assert.ok(types.includes('table'), 'table renders a table')
+  const wrapper = blocks.find((block) => block.props !== undefined && block.props.className === 'sc-md-table-wrap')
+  assert.ok(wrapper !== undefined, 'a table renders inside its copy-chip host wrapper')
+  assert.equal(wrapper.children[0].type, 'table', 'the wrapper holds the table')
   const code = blocks.find((block) => block.type === 'pre')
   assert.equal(code.children[0].children[0], 'const a = 1')
   const flat = JSON.stringify(blocks)
@@ -1206,7 +1208,9 @@ test('fallback markdown keeps a GFM escaped pipe inside one table cell and norma
     '| §2 编辑矩阵 | 新增行：`单元格多行 \\| 同一 <p> 内用 <br/> 分行` |',
     '| §3 验证第 6 条 | 短 |'
   ].join('\n')
-  const table = exports.renderMarkdownFallback(text, 'md').find((block) => block.type === 'table')
+  const table = exports.renderMarkdownFallback(text, 'md')
+    .find((block) => block.props !== undefined && block.props.className === 'sc-md-table-wrap')
+    .children[0]
   assert.ok(table !== undefined, 'the escaped pipe must not break the table block')
   const rows = table.children[0].children[0]
   assert.equal(rows.length, 3, 'header plus two body rows')
@@ -1220,6 +1224,180 @@ test('fallback markdown keeps a GFM escaped pipe inside one table cell and norma
   const codeNode = rows[1].children[0][1].children[0].find((node) => node !== null && typeof node === 'object')
   assert.ok(codeNode !== undefined, 'the inline code span still renders as code')
   assert.equal(codeNode.children[0], '单元格多行 | 同一 <p> 内用 <br/> 分行', 'the escape backslash is dropped')
+})
+
+/** Minimal element face the copy-chip decorator touches; the suite has no DOM. */
+function createFakeElement(tagName) {
+  const listeners = new Map()
+  const element = {
+    tagName: tagName.toUpperCase(),
+    className: '',
+    textContent: '',
+    title: '',
+    attributes: {},
+    children: [],
+    parentElement: null,
+    style: {},
+    classList: {
+      add(name) {
+        const names = new Set(element.className.split(/\s+/).filter((entry) => entry !== ''))
+        names.add(name)
+        element.className = Array.from(names).join(' ')
+      },
+      contains(name) {
+        return element.className.split(/\s+/).includes(name)
+      }
+    },
+    appendChild(child) {
+      child.parentElement = element
+      element.children.push(child)
+      return child
+    },
+    addEventListener(type, handler) {
+      listeners.set(type, handler)
+    },
+    setAttribute(name, value) {
+      element.attributes[name] = String(value)
+    },
+    getAttribute(name) {
+      return element.attributes[name] === undefined ? null : element.attributes[name]
+    },
+    click() {
+      const handler = listeners.get('click')
+      if (handler !== undefined) handler()
+    },
+    querySelector(selector) {
+      for (const child of element.children) {
+        if (selector === 'table' && child.tagName === 'TABLE') return child
+      }
+      return null
+    }
+  }
+  return element
+}
+
+function createTableElement(rows) {
+  const table = createFakeElement('table')
+  table.rows = rows.map((cells) => ({ cells: cells.map((text) => ({ textContent: text })) }))
+  return table
+}
+
+/** One rendered table and one fallback code fence under a fake Markdown root. */
+function createCopyTargets() {
+  const table = createTableElement([['位置', '改动'], ['§1', 'a\tb']])
+  const tableHost = createFakeElement('div')
+  tableHost.className = 'tableScroll'
+  tableHost.appendChild(table)
+  const fence = createFakeElement('pre')
+  fence.className = 'sc-md-code'
+  const code = createFakeElement('code')
+  code.textContent = 'const a = 1'
+  fence.appendChild(code)
+  return {
+    tableHost,
+    fence,
+    root: {
+      querySelectorAll(selector) {
+        if (selector === 'table') return [table]
+        if (selector === 'pre.sc-md-code') return [fence]
+        return []
+      }
+    }
+  }
+}
+
+/** Install the document/navigator face a copy click needs; returns a restore function. */
+function installCopyGlobals(writeText) {
+  const previousDocument = globalThis.document
+  const previousNavigator = globalThis.navigator
+  globalThis.document = { createElement: (tag) => createFakeElement(tag) }
+  globalThis.navigator = { clipboard: { writeText } }
+  return () => {
+    globalThis.document = previousDocument
+    if (previousNavigator === undefined) delete globalThis.navigator
+    else globalThis.navigator = previousNavigator
+  }
+}
+
+test('copy helpers flatten cells, rows and whitespace into a TSV payload', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.normalizeCellText('  a\n\tb  '), 'a b')
+  assert.equal(exports.normalizeCellText(undefined), '')
+  assert.equal(exports.tableToTsv([['a', ' b '], ['1\n2', null]]), 'a\tb\n1 2\t')
+  assert.equal(exports.tableToTsv([]), '')
+})
+
+test('decorateCopyChips adds one localized chip per table and copies TSV', async (t) => {
+  const { exports } = loadBundle()
+  const { root, tableHost, fence } = createCopyTargets()
+  const writes = []
+  const restore = installCopyGlobals(async (text) => { writes.push(text) })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const labels = { table: { copy: '复制表格', copied: '已复制' }, code: { copy: '复制', copied: '复制成功' } }
+    exports.decorateCopyChips(root, labels)
+    exports.decorateCopyChips(root, labels)
+    assert.equal(tableHost.children.length, 2, 'a table keeps exactly one chip across repeated decoration')
+    assert.equal(fence.children.length, 2, 'a fallback fence gets its own chip')
+    assert.ok(tableHost.classList.contains('sc-copy-host'), 'the table scroll container becomes the chip host')
+    const tableChip = tableHost.children[1]
+    const fenceChip = fence.children[1]
+    assert.equal(tableChip.className, 'sc-copy-chip')
+    assert.equal(tableChip.textContent, '复制表格')
+    assert.equal(tableChip.getAttribute('aria-label'), '复制表格')
+    assert.equal(fenceChip.textContent, '复制')
+
+    tableChip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(writes, ['位置\t改动\n§1\ta b'], 'clicks copy the rendered grid, tabs preserved')
+    assert.equal(tableChip.textContent, '已复制', 'the chip confirms the write')
+    t.mock.timers.tick(exports.COPY_FEEDBACK_MS)
+    assert.equal(tableChip.textContent, '复制表格', 'the confirmation reverts after the feedback window')
+
+    exports.decorateCopyChips(root, { table: { copy: 'Copy table', copied: 'Copied' }, code: { copy: 'Copy', copied: 'Copied' } })
+    assert.equal(tableChip.textContent, 'Copy table', 'a locale switch re-syncs an idle chip')
+    assert.equal(fenceChip.textContent, 'Copy')
+
+    fenceChip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(writes, ['位置\t改动\n§1\ta b', 'const a = 1'], 'a fence copies only its code, never the chip label')
+
+    tableChip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(tableChip.textContent, 'Copied', 'the confirmation uses the locale active at click time')
+    t.mock.timers.tick(exports.COPY_FEEDBACK_MS)
+    assert.equal(tableChip.textContent, 'Copy table')
+
+    const replacement = createTableElement([['x', 'y'], ['3', '4']])
+    tableHost.children[0] = replacement
+    replacement.parentElement = tableHost
+    exports.decorateCopyChips({ querySelectorAll: (selector) => (selector === 'table' ? [replacement] : []) }, labels)
+    assert.equal(tableHost.children.length, 2, 'stream re-render reuses the chip beside the replaced table')
+    tableChip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(writes.at(-1), 'x\ty\n3\t4', 'the chip reads the table that is mounted at click time')
+  } finally {
+    t.mock.timers.reset()
+    restore()
+  }
+})
+
+test('a rejected clipboard write leaves the chip label untouched', async () => {
+  const { exports } = loadBundle()
+  const { root, tableHost } = createCopyTargets()
+  const restore = installCopyGlobals(async () => {
+    throw new Error('denied')
+  })
+  try {
+    const labels = { table: { copy: '复制表格', copied: '已复制' }, code: { copy: '复制', copied: '复制成功' } }
+    exports.decorateCopyChips(root, labels)
+    tableHost.children[1].click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(tableHost.children[1].textContent, '复制表格')
+    assert.equal(tableHost.children[1].getAttribute('aria-label'), '复制表格')
+  } finally {
+    restore()
+  }
 })
 
 /** One assistant row whose single text block is `text`, on a settled panel state. */

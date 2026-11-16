@@ -235,7 +235,10 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   error banner. Markdown uses the shell's renderer (GFM tables, code fences with localized
   copy/wrap controls, footnotes) and only falls back to a reduced built-in renderer when the
   shell does not export `MarkdownText`; the fallback covers headings, lists, fences,
-  quotes and simple tables only, with raw HTML shown as literal text.
+  quotes and simple tables only, with raw HTML shown as literal text. Hovering a table
+  reveals a **复制表格** / **Copy table** chip that puts the rendered grid on the clipboard as
+  tab-separated text (paste it straight into a spreadsheet); the fallback renderer's code
+  fences get the same copy chip.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
@@ -649,6 +652,12 @@ is about a dependency, not this plugin.
 - **The dock does not follow Performance & usage.** DSH can render its own composer
   statistics in detailed or compact mode; the side-chat dock has fixed content and ignores
   that preference.
+- **The table copy chip belongs to the rendered DOM, not to Markdown text.** It is appended
+  by the plugin after the shell renders, so it follows the rendered grid: a wide table that
+  scrolls horizontally carries the chip with its content, and the clipboard payload is the
+  rendered cell text (whitespace collapsed, one line per row, one tab per column), so bold,
+  inline code and link markup are not preserved. A message that switches locale re-labels an
+  idle chip; a chip that is mid-confirmation keeps its label until the 1.2 s window ends.
 - The tab is Web-only, and the plugin is not a replacement for the native conversation UI.
 
 ## File map

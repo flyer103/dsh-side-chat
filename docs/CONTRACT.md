@@ -279,6 +279,22 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   module or its `MarkdownText` export is missing; it ignores `streaming`, treats `\|` as a
   literal pipe inside a table cell, and pads/truncates every row to the header's column
   count.
+- Copy controls. Code cards keep the shell's own copy/wrap toolbar. Tables have no shell
+  control, so the bundle decorates the committed Markdown DOM instead of re-rendering it:
+  each rendered `table` gets one `button.sc-copy-chip` appended to its scroll container
+  (which gains `sc-copy-host`), and each fallback `pre.sc-md-code` fence gets the same chip
+  inside itself. Decoration is idempotent — an existing chip is found by class, so a stream
+  mutation only re-syncs the localized label — and a `MutationObserver` scoped to that
+  assistant row's `.sc-md-block` re-decorates as chunks arrive. Chips are hidden until the
+  host is hovered or focused and stay visible on coarse pointers; the chip label comes from
+  `markdown.tableCopy` / `markdown.tableCopied` (fences reuse `markdown.copy` /
+  `markdown.copied`). A click writes the rendered grid as TSV (row `\n`, cell `\t`,
+  whitespace collapsed per cell) through `navigator.clipboard`, falling back to a temporary
+  textarea plus `execCommand('copy')`; a successful write shows the copied label for
+  `COPY_FEEDBACK_MS` (1200 ms), a rejected write shows nothing. Known limits: the chip is a
+  node React does not own (appended last, positioned absolutely so DOM order never matters),
+  a wide table that scrolls horizontally carries the chip with its content, and the payload
+  is rendered text, so emphasis and inline-code markup are not preserved.
 
 ### Reference completion (`@`)
 
