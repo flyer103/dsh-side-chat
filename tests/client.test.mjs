@@ -259,7 +259,10 @@ function createFetchStub(responses) {
     calls.push({ url, body, method: init === undefined ? undefined : init.method })
     const name = url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url
     const handler = responses[name]
-    const payload = typeof handler === 'function' ? handler(body) : (handler === undefined ? { ok: true } : handler)
+    // A tab that mounts probes `restore` first; with no stored side session the
+    // host answers with a null session id.
+    const fallback = name === 'restore' ? { ok: true, sessionId: null } : { ok: true }
+    const payload = typeof handler === 'function' ? handler(body) : (handler === undefined ? fallback : handler)
     return {
       ok: true,
       status: 200,
@@ -986,13 +989,14 @@ test('runtime sends through /side-chat/api/, pulls on demand and removes the opt
 
   await runtime.send('main-1', 'hello side chat')
   assert.deepEqual(fetchStub.calls.map((call) => call.url), [
+    `${API_PREFIX}restore`,
     `${API_PREFIX}create`,
     `${API_PREFIX}prompt`
   ])
   for (const call of fetchStub.calls) assert.ok(call.url.startsWith(API_PREFIX), call.url)
-  assert.equal(fetchStub.calls[0].body.sourceId, 'main-1')
-  assert.equal(fetchStub.calls[1].body.sessionId, 'side-1')
-  assert.equal(fetchStub.calls[1].body.text, 'hello side chat')
+  assert.equal(fetchStub.calls[1].body.sourceId, 'main-1')
+  assert.equal(fetchStub.calls[2].body.sessionId, 'side-1')
+  assert.equal(fetchStub.calls[2].body.text, 'hello side chat')
   const afterSend = runtime.getState('main-1')
   assert.equal(afterSend.sessionId, 'side-1')
   assert.equal(afterSend.inheritedEventCount, 3)
@@ -1090,13 +1094,85 @@ test('a repeated message text does not retire a new optimistic row early', async
   await runtime.close('main-1')
 })
 
+test('a mounted tab adopts the side session a restarted host still stores', async () => {
+  const fetched = createFetchStub({
+    restore: { ok: true, sessionId: 'side-1', inheritedEventCount: 2 },
+    snapshot: {
+      ok: true,
+      inheritedEventCount: 2,
+      running: false,
+      status: 'idle',
+      lastError: null,
+      entries: [userEntry(2, 'before the restart')]
+    }
+  })
+  const { runtime } = createRuntimeWith(fetched)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await flush()
+
+  const state = runtime.getState('main-1')
+  assert.equal(state.sessionId, 'side-1')
+  assert.equal(state.inheritedEventCount, 2)
+  assert.equal(fetched.calls[0].url, `${API_PREFIX}restore`)
+  assert.equal(fetched.calls[0].body.sourceId, 'main-1')
+  assert.equal(fetched.calls[0].body.instanceKey, 'main-1')
+
+  await runtime.pollOnce('main-1')
+  assert.equal(runtime.getState('main-1').nodes[0].text, 'before the restart')
+  await runtime.close('main-1')
+})
+
+test('a send racing the mount probe waits for the restored session instead of creating one', async () => {
+  let answerRestore
+  const restore = new Promise((resolve) => {
+    answerRestore = resolve
+  })
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    const body = init === undefined ? {} : JSON.parse(init.body)
+    calls.push({ url, body })
+    const name = url.startsWith(API_PREFIX) ? url.slice(API_PREFIX.length) : url
+    if (name === 'restore') await restore
+    const payload = name === 'restore'
+      ? { ok: true, sessionId: 'side-9', inheritedEventCount: 0 }
+      : name === 'snapshot'
+        ? { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [] }
+        : { ok: true }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  const { exports } = loadBundle({ primitives: false })
+  const scheduler = createSchedulerStub()
+  const runtime = exports.createRuntime({
+    fetch: fetchImpl,
+    setTimeout: scheduler.setTimeout,
+    clearTimeout: scheduler.clearTimeout,
+    document: null,
+    pollRunningMs: 5,
+    pollIdleMs: 5,
+    stream: false
+  })
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  const sending = runtime.send('main-1', 'hello')
+  answerRestore()
+  await sending
+
+  assert.equal(calls.filter((call) => call.url === `${API_PREFIX}create`).length, 0)
+  assert.equal(runtime.getState('main-1').sessionId, 'side-9')
+  const prompt = calls.find((call) => call.url === `${API_PREFIX}prompt`)
+  assert.equal(prompt.body.sessionId, 'side-9')
+  await runtime.close('main-1')
+})
+
 test('closing a tab before the first message never calls the host close route', async () => {
   const fetchStub = createFetchStub({})
   const { runtime } = createRuntimeWith(fetchStub)
   runtime.open('main-1')
   runtime.setVisible('main-1', true)
   await runtime.close('main-1')
-  assert.equal(fetchStub.calls.length, 0)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}close`).length, 0)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}create`).length, 0)
   assert.equal(runtime.getState('main-1'), null)
 })
 
@@ -1113,7 +1189,7 @@ test('create failure stores a localizable failure record and restores the draft'
   assert.equal(state.pending.length, 0)
   assert.equal(state.draft, 'hello')
   assert.deepEqual(state.error, { code: 'create-failed', message: 'fork failed', params: {} })
-  assert.equal(fetchStub.calls.length, 1)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}create`).length, 1)
 })
 
 test('prompt failure keeps the session and reports a localizable failure instead of dropping it', async () => {
@@ -1161,7 +1237,7 @@ test('draft and stop controls route through the runtime', async () => {
   runtime.setDraft('main-1', 'typed draft')
   assert.equal(runtime.getState('main-1').draft, 'typed draft')
   await runtime.send('main-1')
-  assert.equal(fetched.calls[1].body.text, 'typed draft')
+  assert.equal(fetched.calls.find((call) => call.url === `${API_PREFIX}prompt`).body.text, 'typed draft')
   await runtime.cancel('main-1')
   assert.equal(fetched.calls.at(-1).url, `${API_PREFIX}cancel`)
 })
@@ -2989,7 +3065,7 @@ test('setDraft stays a plain draft writer without scheduling a lookup', () => {
   runtime.setDraft('main-1', 'see @li')
   assert.equal(runtime.getState('main-1').draft, 'see @li')
   assert.equal(scheduler.pending(), 0)
-  assert.equal(fetchStub.calls.length, 0)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}references`).length, 0)
   assert.equal(runtime.getState('main-1').reference.status, 'closed')
 })
 

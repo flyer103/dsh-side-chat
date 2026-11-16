@@ -220,7 +220,8 @@ there is no persistence, schema or prompt change to migrate.
 - Surfacing the side session's **approval prompts** in the panel (today the side session
   inherits the parent's approval policy; if that policy asks the human, the request has no
   answerer inside the panel).
-- Side-session history across a GUI restart (today: in-memory handles only).
+- ~~Side-session history across a GUI restart~~ — implemented: the identity derives a stable
+  session id and a mounting tab resumes the stored session.
 
 ## Non-goals
 

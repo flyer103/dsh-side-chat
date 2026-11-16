@@ -183,14 +183,17 @@ permission rows. It also inherits:
   catalog either.
 - One side session per side-chat tab. A parent session can hold several side-chat tabs in
   the same pane; each tab owns its own side session, persisted log, live stream and
-  status/draft state. Closing a tab ends only that side session — it cannot be reopened —
-  and the other side chats and the parent session are unaffected.
+  status/draft state. Closing a tab ends only that side session — its stored log is deleted
+  and it cannot be reopened — and the other side chats and the parent session are unaffected.
 - The side session owns its own persisted log on disk. The main session's log is untouched.
-- Host handles live in memory. A GUI or host restart loses every side session. A page reload
-  drops the client tab state; if the rebuilt tab reuses the same per-tab identity while the
-  host process is still running, `create` is idempotent per identity and reattaches to the
-  existing side session, otherwise the next message starts a new one (see Known
-  limitations).
+- A side session survives a GUI or host restart while its tab stays open: the tab's identity
+  derives the same session id, and a mounting tab probes `restore` to adopt the stored
+  session (and its transcript) before the next message. What destroys a side chat is closing
+  its tab (or deleting its stored log); closing the app no longer does. A page reload drops
+  the client tab state, but a rebuilt tab reuses the same per-tab identity and reattaches.
+- A stored session this build cannot resume (for example a log written by an incompatible
+  future format) is left untouched: the tab logs a warning and starts a fresh side session
+  under a new id, so it never wedges.
 - The tab does not attach to the session through the generic client `sessions` service: a
   parentless subagent-origin session is not addressable there. Its message sources are the
   host's live `/side-chat/api/events` stream and the read-only
@@ -443,8 +446,9 @@ node scripts/install.mjs --profile desktop --uninstall
 
 Then restart DSH. Rollback has no migration step: the dependency and the bundle row are the
 only installed state, and no main-session transcript, schema, or workspace file was
-modified by the plugin's installation. Side sessions are ephemeral by design, so there is
-no history to migrate. If you installed into a throwaway profile, delete
+modified by the plugin's installation. Side sessions live in their own stored logs (which
+`close` deletes and rollback leaves behind as ordinary orphaned session directories), so
+there is no history to migrate. If you installed into a throwaway profile, delete
 `~/.dsh/profiles/<name>` after removing the plugin.
 
 ## Troubleshooting
@@ -486,11 +490,12 @@ updates.
 
 **A refresh lost the side chat.**
 
-Tab state lives in memory and is not restored across a reload. If the rebuilt tab reuses the
-same per-tab identity while the host process is still running, its `create` reattaches to
-the existing side session (create is idempotent per instance key); otherwise you get a new
-side chat. After a GUI or host restart every side session is gone. Reopen the guide card or
-press the new-side-chat button; a new side chat is created on the next message.
+Draft text and scroll position live in memory and are not restored across a reload, but the
+side session itself is: the rebuilt tab reuses the same per-tab identity, and its mount probe
+adopts the stored session — before a restart the live handle is reused, after a restart the
+stored log is resumed. Reopen the tab (the right sidebar restores its tabs) and keep
+talking; a new side chat is only created when nothing is stored for that tab — for example
+after its tab was closed, which deletes the stored log.
 
 **Clicking the guide card starts another side chat instead of focusing the old one.**
 
@@ -523,8 +528,9 @@ is about a dependency, not this plugin.
 ## Known limitations
 
 - **Approval prompts are not surfaced in the side-chat tab.** See above.
-- **A closed tab cannot be restored.** Closing destroys only that side session; a GUI or host
-  restart also loses every side session. The other side chats are unaffected.
+- **A closed tab cannot be restored.** Closing its tab destroys only that side session and
+  deletes its stored log; a GUI or host restart keeps every side session whose tab still
+  exists. The other side chats are unaffected.
 - **Every side chat carries its own inherited context.** Its first request is about as large
   as the parent's next request, so N concurrent side chats multiply that cost.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
@@ -544,7 +550,7 @@ is about a dependency, not this plugin.
   skills, attachments, and drag-and-drop are not implemented in the side-chat composer; they
   belong to later phases.
 - **P1b items are designed but not implemented:** model picker for the side session,
-  side-session history across a GUI restart, approval rendering in the tab.
+  approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
   side chat's own requests — including the inherited context its first request re-sends — and
   never the parent's earlier requests; context occupancy is the newest provider-reported

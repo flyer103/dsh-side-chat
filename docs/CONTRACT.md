@@ -21,6 +21,7 @@ never share imports — only these routes.
 | path | request | response |
 |---|---|---|
 | `/side-chat/api/create` | `{ sourceId, instanceKey? }` | `{ ok: true, sessionId, inheritedEventCount }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/restore` | `{ sourceId, instanceKey? }` | `{ ok: true, sessionId, inheritedEventCount }` for an adopted session \| `{ ok: true, sessionId: null }` when the tab has none \| `{ ok: false, code, message }` |
 | `/side-chat/api/prompt` | `{ sessionId, text }` | `{ ok: true }` \| `{ ok: false, code, message }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
@@ -73,6 +74,22 @@ one-side-session-per-parent behavior. Because the client keeps a stable per-tab 
 a retried `create` — or a reload that reissues the same tab identity — reattaches to the
 still-running host-side session instead of creating another. `close` removes the handle
 before disposing so a racing call gets `not-found`, never a double free.
+
+The side-session id is derived from the identity (`side-chat-` plus 128 bits of a SHA-256
+digest of it, never the parent id), so the same tab addresses the same stored session across
+a host restart without any mapping table. When `create` finds that session already stored
+(`sessionPersistence.stat` answers without reading the log), it resumes it with
+`agents.resume` instead of forking a second one, and reports the resumed session's inherited
+event count. Resuming re-composes the preset and the developer section only: the stored log
+already holds the seed, the boundary message and the inherited sandbox/approval events, so
+appending them again would duplicate history. A stored session this build cannot resume is
+left untouched and the tab falls back to a fresh session under a random id (a warning is
+logged). Without a `sessionPersistence` service the plugin stays ephemeral exactly as before.
+
+`restore` answers the mount probe: it performs the same identity resolution but never
+creates, so a tab that mounts after a restart finds its side session (and its transcript)
+before the user sends anything. It returns `sessionId: null` when nothing is stored, which is
+also the answer for a tab whose side session was destroyed by `close`.
 
 ## Host → live stream (`POST /side-chat/api/events`)
 

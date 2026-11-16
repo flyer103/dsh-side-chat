@@ -17,6 +17,7 @@ import {
   routeHandler,
   sideConversationBoundaryPrompt,
   sideDeveloperInstructions,
+  sideSessionId,
   snapshotEntries,
 } from '../lib/index.js'
 
@@ -64,12 +65,23 @@ const DEFAULT_SERVICES = {
   },
 }
 
-function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, followupFailure, disposeFailure } = {}) {
+function makeRuntime({
+  parents = [],
+  services = {},
+  createDelayMs = 0,
+  createFailure,
+  followupFailure,
+  disposeFailure,
+  resumeFailure,
+  resumeEvents = [],
+  resumeInheritedEventCount = 0,
+} = {}) {
   const routes = new Map()
   const effects = []
   const listeners = new Map()
   const warnings = []
   const created = []
+  const resumed = []
   const handles = []
   const disposed = []
   const locateCalls = []
@@ -79,8 +91,8 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
 
   const resolvedServices = { ...DEFAULT_SERVICES, ...services }
 
-  async function defaultCreate(options) {
-    created.push(options)
+  async function defaultCreate(options, { resumed = false } = {}) {
+    if (!resumed) created.push(options)
     if (createFailure !== undefined) throw createFailure
     const seedEvents = Array.isArray(options.seed) ? structuredClone(options.seed) : []
     const session = {
@@ -165,6 +177,19 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
         if (createDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, createDelayMs))
         return defaultCreate(options)
       },
+      resume: async (options) => {
+        if (createDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, createDelayMs))
+        resumed.push(options)
+        if (resumeFailure !== undefined) throw resumeFailure
+        return defaultCreate({
+          sessionId: options.resumeSessionId,
+          agentOptions: options.agentOptions,
+          setup: options.setup,
+          meta: {},
+          seed: resumeEvents,
+          inheritedEventCount: resumeInheritedEventCount,
+        }, { resumed: true })
+      },
     },
     get: (serviceName) => resolvedServices[serviceName],
     on(eventName, callback) {
@@ -191,6 +216,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
     listeners,
     warnings,
     created,
+    resumed,
     handles,
     disposed,
     locateCalls,
@@ -378,6 +404,7 @@ test('apply registers every contract route', () => {
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
     `${ROUTE_PREFIX}references`,
+    `${ROUTE_PREFIX}restore`,
     `${ROUTE_PREFIX}snapshot`,
     `${ROUTE_PREFIX}status`,
   ])
@@ -696,7 +723,9 @@ test('closing one instance leaves the other alive and allows the key a new sessi
 
   const recreated = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
   assert.equal(recreated.body.ok, true)
-  assert.notEqual(recreated.body.sessionId, first.body.sessionId)
+  // The id is derived from the instance key, so the same tab reuses it; the
+  // previous session is gone (its stored log was removed by close above).
+  assert.equal(recreated.body.sessionId, first.body.sessionId)
   assert.notEqual(recreated.body.sessionId, second.body.sessionId)
   assert.equal(runtime.created.length, 3)
   const listed = (await post(runtime, 'list', {})).body.sessions
@@ -704,6 +733,95 @@ test('closing one instance leaves the other alive and allows the key a new sessi
     listed.map((entry) => entry.sessionId).sort(),
     [second.body.sessionId, recreated.body.sessionId].sort(),
   )
+})
+
+test('sideSessionId is deterministic per identity and never the parent id', () => {
+  assert.equal(sideSessionId('main-1#tab-a'), sideSessionId('main-1#tab-a'))
+  assert.notEqual(sideSessionId('main-1#tab-a'), sideSessionId('main-1#tab-b'))
+  assert.match(sideSessionId('main-1#tab-a'), /^side-chat-[0-9a-f]{32}$/)
+})
+
+test('restore reports no session for an unknown tab and creates nothing', async () => {
+  let statCalls = 0
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: {
+      sessionPersistence: {
+        stat() {
+          statCalls += 1
+          throw new Error('not found')
+        },
+      },
+    },
+  })
+  apply(runtime.ctx)
+
+  const restored = await post(runtime, 'restore', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.deepEqual(restored.body, { ok: true, sessionId: null })
+  assert.equal(statCalls, 1)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 0)
+})
+
+test('restore adopts the stored side session of a restarted host', async () => {
+  const parent = makeParent({ events: BASE_EVENTS })
+  const runtime = makeRuntime({
+    parents: [parent],
+    resumeEvents: BASE_EVENTS,
+    resumeInheritedEventCount: 4,
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const restored = await post(runtime, 'restore', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(restored.body.ok, true)
+  assert.equal(restored.body.sessionId, sideSessionId('main-1#tab-a'))
+  assert.equal(restored.body.inheritedEventCount, 4)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+  assert.equal(runtime.resumed[0].resumeSessionId, sideSessionId('main-1#tab-a'))
+
+  // A later create reattaches instead of forking a second session.
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.sessionId, restored.body.sessionId)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+})
+
+test('create resumes a stored side session instead of forking again', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    resumeEvents: BASE_EVENTS,
+    resumeInheritedEventCount: 4,
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.ok, true)
+  assert.equal(runtime.created.length, 0)
+  assert.equal(runtime.resumed.length, 1)
+  const setup = runtime.resumed[0].setup
+  assert.equal(typeof setup, 'function')
+  // Resuming must not re-append the boundary message or the inherited policies.
+  assert.equal(runtime.handles[0].agent.session.appends.length, 0)
+})
+
+test('a stored session that cannot be resumed falls back to a fresh session', async () => {
+  const runtime = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    resumeFailure: new Error('format v5 is not supported'),
+    services: { sessionPersistence: { stat: async (id) => ({ header: { id }, eventCount: 4 }) } },
+  })
+  apply(runtime.ctx)
+
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(created.body.ok, true)
+  assert.equal(runtime.resumed.length, 1)
+  assert.equal(runtime.created.length, 1)
+  assert.notEqual(runtime.created[0].sessionId, sideSessionId('main-1#tab-a'))
+  assert.match(created.body.sessionId, /^side-chat-/)
+  assert.match(runtime.warnings.join('\n'), /starting a fresh side session/)
 })
 
 test('list reports both instances of a parent with their source id', async () => {
@@ -763,7 +881,10 @@ test('close removes the handle first, disposes, then deletes the persisted artif
 
     const recreated = await post(runtime, 'create', { sourceId: 'main-1' })
     assert.equal(recreated.body.ok, true)
-    assert.notEqual(recreated.body.sessionId, sessionId)
+    // The stored log is gone, so the identity derives the same id for a session
+    // that starts from scratch again.
+    assert.equal(recreated.body.sessionId, sessionId)
+    assert.equal(runtime.created.length, 2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

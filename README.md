@@ -41,7 +41,8 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 ## What it does
 
 - **Native sidebar tab** — lives in the session's right sidebar next to the other tabs; no standalone session-header button and no floating overlay.
-- **Several at once** — a parent session can hold multiple independent side-chat tabs, each its own ephemeral side session with a numbered chip; open another from the guide card or from a tab's **New side chat** button.
+- **Several at once** — a parent session can hold multiple independent side-chat tabs, each its own side session with a numbered chip; open another from the guide card or from a tab's **New side chat** button.
+- **Survives a restart** — a side chat outlives a GUI or host restart while its tab stays open: the tab re-adopts its stored session and transcript. Closing the tab is what destroys it.
 - **Inherits context** — the parent's completed turns plus a snapshot of what the main session is doing right now, taken when that side chat is created.
 - **Inherits the agent** — same working directory, preset composition, tools, skills, model routing, sandbox mode and approval policy.
 - **Really edits files** — write/edit/bash changes land in the same workspace and the main session sees them.
@@ -63,7 +64,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 
 - Approval prompts are not shown inside the side-chat tab: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
 - A closed tab cannot be restored: reopening the guide card or pressing **New side chat** starts a new side chat, whose agent is created on the next message.
-- P1b, designed but not implemented: model picker, surviving a GUI restart, approval rendering in the tab.
+- P1b, designed but not implemented: model picker, approval rendering in the tab.
 - `@` completion depends on the host file-reference provider and only completes files and folders: `@session` references, `/` commands and skills, attachments and drag-and-drop are not part of the side-chat composer yet.
 - The inherited context is a snapshot taken when that side chat is created; later main-session turns are not pushed into an existing side chat, and each side chat keeps its own snapshot.
 - Token streaming rides on a streamable `fetch` response. If the page transport buffers the response (detected by a missing first frame), the tab falls back to snapshot polling: the running indicator returns and the reply still appears while it grows, at poll granularity.
@@ -94,7 +95,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 dsh plugin --profile desktop remove @flyer103/dsh-side-chat
 ```
 
-Then restart DSH. No transcript, schema or workspace data is migrated or deleted; side chats are ephemeral.
+Then restart DSH. No transcript, schema or workspace data is migrated or deleted; side chats keep their own stored sessions, which the plugin stops resuming once it is removed.
 
 ## License
 
