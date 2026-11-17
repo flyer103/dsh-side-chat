@@ -1479,6 +1479,82 @@ test('without the shell MarkdownText the panel falls back to the built-in render
   assert.equal(fallback.props.className, 'sc-md')
 })
 
+test('a bare TeX display environment is wrapped into display math', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const source = [
+    '结论：',
+    '\\begin{align}',
+    'a &= b \\\\',
+    'c &= d',
+    '\\end{align}',
+    '结束'
+  ].join('\n')
+  assert.equal(exports.normalizeBareTexEnvironments(source), [
+    '结论：',
+    '$$',
+    '\\begin{align}',
+    'a &= b \\\\',
+    'c &= d',
+    '\\end{align}',
+    '$$',
+    '结束'
+  ].join('\n'))
+})
+
+test('bare environment wrapping is idempotent', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const wrapped = exports.normalizeBareTexEnvironments('\\begin{cases}\nx\n\\end{cases}')
+  assert.equal(wrapped, '$$\n\\begin{cases}\nx\n\\end{cases}\n$$')
+  assert.equal(exports.normalizeBareTexEnvironments(wrapped), wrapped)
+})
+
+test('bare environment wrapping leaves unsupported or unsafe shapes literal', () => {
+  const { exports } = loadBundle({ primitives: true })
+  const normalize = exports.normalizeBareTexEnvironments
+  const untouched = [
+    '```\n\\begin{align}\na\n\\end{align}\n```',
+    '~~~latex\n\\begin{align}\na\n\\end{align}\n~~~',
+    '$$\n\\begin{align}\na\n\\end{align}\n$$',
+    '\\[\n\\begin{align}\na\n\\end{align}\n\\]',
+    '\\(\n\\begin{cases}\na\n\\end{cases}\n\\)',
+    '  \\begin{align}\na\n\\end{align}',
+    '\\begin{document}\nx\n\\end{document}',
+    '\\begin{align}\na',
+    '\\begin{align}\na\n\\end{align} tail',
+    'text \\begin{align} a \\end{align}'
+  ]
+  for (const source of untouched) assert.equal(normalize(source), source, source)
+  assert.equal(normalize(undefined), undefined)
+  assert.equal(normalize(''), '')
+})
+
+test('the shell renderer receives a settled bare environment as display math', () => {
+  const text = '\\begin{align}\na &= b\n\\end{align}'
+  const { markdown } = renderAssistantPanel(text, { primitives: true })
+  const shell = expandElement(markdown)
+  assert.equal(shell.type.$$typeof, Symbol.for('react.memo'))
+  assert.equal(shell.props.text, '$$\n\\begin{align}\na &= b\n\\end{align}\n$$')
+  assert.equal(shell.props.streaming, false)
+})
+
+test('streaming text reaches the shell renderer unnormalized', () => {
+  const text = '\\begin{align}\na &= b\n\\end{align}'
+  const { markdown } = renderAssistantPanel(text, { primitives: true })
+  const shell = markdown.type({ ...markdown.props, streaming: true })
+  assert.equal(shell.props.text, text)
+  assert.equal(shell.props.streaming, true)
+})
+
+test('the built-in fallback renderer never sees the display-math wrapper', () => {
+  const text = '\\begin{align}\na &= b\n\\end{align}'
+  const { markdown } = renderAssistantPanel(text)
+  const fallback = expandElement(markdown)
+  const serialized = JSON.stringify(fallback)
+  assert.equal(serialized.includes('$$'), false)
+  assert.equal(serialized.includes('begin{align}'), true)
+  assert.equal(serialized.includes('a &= b'), true)
+})
+
 test('bundle also materializes when the primitives seed module is present', () => {
   const { exports } = loadBundle({ primitives: true })
   const { registered } = applyBundle(exports)

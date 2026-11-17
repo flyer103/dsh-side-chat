@@ -270,9 +270,18 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   thumbnails (local object URLs); it reconciles against the committed message by text **and**
   attachment-id list, not text alone.
 - Assistant bodies render through the shell's `MarkdownText` (GFM: tables, task lists, code
-  fences, footnotes, KaTeX; raw HTML stays literal text). The seed module exports it as a
-  `React.memo` component, so detection accepts a component object (`$$typeof`), not only a
-  function; the renderer receives `streaming` and a reference-stable `labels` object built
+  fences, footnotes, KaTeX; raw HTML stays literal text). Math delimiters come from the
+  shell grammar (`$…$`, `$$…$$`, `\(…\)`, a line-start `\[…\]`); the bundle additionally
+  wraps a **column-0 bare display environment** — `\begin{align}…\end{align}` and the other
+  KaTeX display environments in `TEX_DISPLAY_ENVIRONMENTS` — as `$$\n…\n$$` before a settled
+  message reaches the renderer, because that spelling is valid LaTeX but never enters math
+  on its own. The wrap only happens when the matching `\end{…}` closes its own line, and is
+  skipped for streaming text, code fences, existing math, indented environments, unknown
+  environments and an unclosed environment; declared limits are a `\[…\]` that does not
+  start a line and a bare environment inside a list item or blockquote, which stay literal.
+  The seed module exports `MarkdownText` as a `React.memo` component, so detection accepts a
+  component object (`$$typeof`), not only a function; the renderer receives `streaming` and
+  a reference-stable `labels` object built
   from the active locale seat (`markdown.copy`, `markdown.copied`,
   `markdown.codeBlock.title`, `markdown.codeBlock.wrap`, `markdown.codeBlock.unwrap`,
   `markdown.footnotes`). A lightweight built-in renderer is the fallback only when the

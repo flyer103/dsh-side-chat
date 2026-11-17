@@ -235,10 +235,15 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   error banner. Markdown uses the shell's renderer (GFM tables, code fences with localized
   copy/wrap controls, footnotes) and only falls back to a reduced built-in renderer when the
   shell does not export `MarkdownText`; the fallback covers headings, lists, fences,
-  quotes and simple tables only, with raw HTML shown as literal text. Hovering a table
-  reveals a **复制表格** / **Copy table** chip that puts the rendered grid on the clipboard as
-  tab-separated text (paste it straight into a spreadsheet); the fallback renderer's code
-  fences get the same copy chip.
+  quotes and simple tables only, with raw HTML shown as literal text. LaTeX reaches KaTeX
+  through the shell grammar — `$…$`, `$$…$$`, `\(…\)` and a `\[…\]` that starts a line — and
+  a settled reply additionally gets a column-0 bare display environment
+  (e.g. `\begin{align}…\end{align}`) wrapped as `$$\n…\n$$` by the plugin, since that
+  spelling never enters math on its own; streaming text, code fences, existing math and an
+  indented or unclosed environment stay literal, as does a `\[…\]` that does not start a
+  line. Hovering a table reveals a **复制表格** / **Copy table** chip that puts the rendered
+  grid on the clipboard as tab-separated text (paste it straight into a spreadsheet); the
+  fallback renderer's code fences get the same copy chip.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
@@ -493,7 +498,9 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
   `@` route (file/folder and session candidates) and the image upload/read routes are covered
   by unit tests, with the combined `@` route and the raw image routes additionally framed over
   an in-process real HTTP server; the session mention spelling was checked against the
-  installed build's own parser. None of these has been exercised in a real-process GUI.
+  installed build's own parser; and the LaTeX display-environment wrap is covered by client
+  unit tests plus a real micromark parse of the normalized text. None of these has been
+  exercised in a real-process GUI.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
