@@ -1309,13 +1309,18 @@ function createCopyTargets() {
 /** Install the document/navigator face a copy click needs; returns a restore function. */
 function installCopyGlobals(writeText) {
   const previousDocument = globalThis.document
-  const previousNavigator = globalThis.navigator
+  // Node 21+ exposes `navigator` as a getter-only global, so an assignment throws.
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
   globalThis.document = { createElement: (tag) => createFakeElement(tag) }
-  globalThis.navigator = { clipboard: { writeText } }
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { clipboard: { writeText } },
+    configurable: true,
+    writable: true
+  })
   return () => {
     globalThis.document = previousDocument
     if (previousNavigator === undefined) delete globalThis.navigator
-    else globalThis.navigator = previousNavigator
+    else Object.defineProperty(globalThis, 'navigator', previousNavigator)
   }
 }
 
