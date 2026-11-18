@@ -247,6 +247,9 @@ Unlike read-only side-chat plugins, this one is expected to change files:
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
+- The draft box grows with what you type — up to the main composer's 14 lines, and never
+  more than half the panel's height — then scrolls inside that box; sending or clearing the
+  draft shrinks it back to one line.
 - The message list follows the newest message while you stay at the bottom; scrolling up
   stops the auto-follow.
 - Several side chats can run at once: the guide card opens a new tab on every click, and

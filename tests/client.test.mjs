@@ -3335,6 +3335,54 @@ test('the panel renders the menu above the textarea and routes keys without subm
   assert.equal(unavailableComposer.children[0], null, 'the menu hides once the provider is unavailable')
 })
 
+test('the composer grows with its draft up to the primary cap and half the panel', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.composerHeightLimit({ clientHeight: 900 }), 336, 'a tall panel allows the primary 14-line cap')
+  assert.equal(exports.composerHeightLimit({ clientHeight: 400 }), 200, 'a short panel cannot give the draft more than half of itself')
+  assert.equal(exports.composerHeightLimit({ clientHeight: 40 }), 26, 'the cap never undercuts the one-line floor')
+  assert.equal(exports.composerHeightLimit(null), 336, 'an unmeasured panel keeps the primary cap')
+
+  const growing = { style: {}, scrollHeight: 115 }
+  assert.equal(exports.fitComposerHeight(growing, { clientHeight: 900 }), 115, 'the box follows a five-line draft')
+  assert.equal(growing.style.height, '115px')
+  assert.equal(growing.style.overflowY, 'hidden', 'a draft under the cap shows no inner scrollbar')
+
+  const capped = { style: {}, scrollHeight: 900 }
+  assert.equal(exports.fitComposerHeight(capped, { clientHeight: 900 }), 336, 'a long draft stops at the cap')
+  assert.equal(capped.style.height, '336px')
+  assert.equal(capped.style.overflowY, 'auto', 'past the cap the box owns the scroll')
+
+  const shrunk = { style: { height: '336px', overflowY: 'auto' }, scrollHeight: 46 }
+  assert.equal(exports.fitComposerHeight(shrunk, { clientHeight: 900 }), 46, 'clearing lines reclaims the height')
+  assert.equal(shrunk.style.overflowY, 'hidden')
+
+  const empty = { style: {}, scrollHeight: 18 }
+  assert.equal(exports.fitComposerHeight(empty, null), 26, 'the empty draft keeps the one-line floor')
+  const hidden = { style: {}, scrollHeight: 0 }
+  assert.equal(exports.fitComposerHeight(hidden, null), null, 'a hidden box keeps its stylesheet height and scroll')
+  assert.equal(hidden.style.overflowY, undefined, 'a hidden box is not forced to hide its scroll')
+  assert.equal(exports.fitComposerHeight({}, null), null, 'an element without layout metrics is left alone')
+  assert.equal(exports.fitComposerHeight(null, null), null)
+})
+
+test('the panel hands the script the textarea and the root that bounds it', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const tree = renderPanel(bodyRegistration, props, panelState({ draft: 'a\nb\nc' }))
+  const root = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-root')
+  const textarea = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-textarea')
+  assert.ok(root.props.ref !== undefined && root.props.ref !== null, 'the root exposes its own box for the cap')
+  assert.ok(textarea.props.ref !== undefined && textarea.props.ref !== null, 'the textarea exposes its box for the fit')
+  assert.notEqual(root.props.ref, textarea.props.ref, 'the two measurements stay distinct')
+})
+
+test('the draft height is script-owned, not pinned by the stylesheet', () => {
+  const { exports } = loadBundle()
+  const rule = exports.PANEL_CSS.match(/\.sc-textarea \{[^}]*\}/)
+  assert.ok(rule !== null, 'the textarea rule ships')
+  assert.ok(!/field-sizing/.test(exports.PANEL_CSS), 'no second height owner competes with the fit')
+  assert.ok(!/max-height/.test(rule[0]), 'the stylesheet must not cap the box the script sizes')
+})
+
 test('committed user bubbles render file and folder references as inert chips', () => {
   const { bodyRegistration } = panelRenderer()
   const state = panelState({
