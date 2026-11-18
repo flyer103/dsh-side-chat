@@ -214,7 +214,7 @@ sketch below fixes the semantics for review.
 The route registration and menu rendering are additive. Reverting the slices removes them;
 there is no persistence, schema or prompt change to migrate.
 
-## P1a-2 — `@session` references (this phase)
+## P1a-2 — `@session` references (shipped in 0.8.0)
 
 The primary composer's `@` menu searches workspace paths *and* sessions. Picking a session
 inserts the canonical `@[title](dsh-session:…)` mention, and DSH's mounted session-reference
@@ -223,8 +223,8 @@ plugin turns that mention into a prepared, budgeted snapshot of the referenced s
 menu search sessions too and inserts the same canonical mention: the model-visible effect is
 the primary composer's, while the plugin still reads no file or session content itself.
 
-Runtime basis: DSH `0.2.2-rc.3` (the installed Desktop build). Verified in the loaded profile
-through Inspect: `ctx.get('sessionReferenceResolver')` exposes
+Runtime basis: DSH `0.2.2-rc.3` (then the installed Desktop build; it is now `0.2.2-rc.5`).
+Verified in the loaded profile through Inspect: `ctx.get('sessionReferenceResolver')` exposes
 `listCandidates(agent, query, limit?, signal?)`, and the source installs the
 `agent/pre-step` listener that replaces canonical mentions with prepared context. The side
 agent is a normal `ctx.agents.create` agent whose user messages carry `source: { kind: 'user' }`,
@@ -334,7 +334,7 @@ the session id and escaped labels.
 Additive. Reverting the route fields and client rows falls back to files-only completion; no
 persistence, schema or prompt change to migrate.
 
-## P1b-1 — image input (implemented, unreleased)
+## P1b-1 — image input (shipped in 0.8.0)
 
 DSH 0.2.2 already ships the whole image pipeline: the composer uploads bytes, the
 `attachments` store normalizes and persists them, the user message carries durable
@@ -343,10 +343,11 @@ images. The side-chat composer is a hand-written `<textarea>` that only sends te
 phase adds the composer/upload/serve triad and reuses `ctx.attachments` — it imports no
 `@deepseek-ai/*` package and keeps the hand-written bundle.
 
-Runtime basis: the installed DSH is **0.2.2-rc.3** (the local source checkout lags at
-0.2.1-rc.2). The host APIs below are present in the installed build and the attachment
-service contract was checked through Inspect; the image flow itself was implemented against
-0.2.2-rc.1 and is covered by unit tests, with no GUI run recorded:
+Runtime basis at implementation: the installed DSH was **0.2.2-rc.3** (the local source
+checkout lags at 0.2.1-rc.2; the installed Desktop build is now 0.2.2-rc.5). The host APIs
+below are present in the 0.2.2 builds and the attachment service contract was checked through
+Inspect; the image flow itself was implemented against 0.2.2-rc.1 and is covered by unit
+tests, with no GUI run recorded:
 `ctx.attachments.saveImages` / `admitPromptContent` / `readImage` / `isAttachmentError`,
 `model.inputModalities`, and `agent.followup` with image content blocks
 (`ImageBlock = { type: 'image', attachment: ImageAttachmentRef }`,

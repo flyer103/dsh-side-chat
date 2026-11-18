@@ -51,12 +51,13 @@ node scripts/install.mjs --profile desktop --dry-run  # 只打印计划
 - **流式输出**：assistant 文本、思考与工具调用在生成过程中逐 token 渲染（实时事件流）；传输不支持流式时自动回退到轮询。
 - **表格 / 代码可复制**：鼠标悬停渲染出来的表格会出现「复制表格」chip，把表格以制表符分隔文本写进剪贴板（可直接粘进表格软件）；代码块沿用 shell 自带的复制 / 换行工具栏。
 - **渲染 LaTeX**：assistant 回复里的 `$…$`、`$$…$$`、`\(…\)` 与行首 `\[…\]` 由 shell 的 KaTeX 渲染；列首的裸 display 环境（如 `\begin{align}…\end{align}`）由插件包成 display math 后再交给 shell。
+- **输入框随草稿长高**：多行草稿会逐行增高，上限对齐主输入框，超过后框内滚动；增高时消息区保持贴底，发送或清空后缩回一行。
 - **显示自己的用量**：composer 下方有一条细状态栏（位置对应 DSH 主输入框的底部 dock），显示这个侧边会话的总 token 数、缓存命中率，以及一个小的上下文占用圆环 + 百分比；悬停可看精确的未缓存输入 / 缓存读取 / 输出计数（提供方报告缓存写入时还会列出缓存写入）和近似的「~已用 / 窗口」值。侧边会话还没有用量样本时整行隐藏，新建侧边会话时重新计数。
 - **关闭即销毁**：关闭某个 tab 时只 dispose 该 tab 的侧边会话，host 会尝试删除它的落盘产物；已关闭的侧边会话无法再打开，其它侧边会话和主会话都不受影响。收起侧边栏或切换 tab 只是暂停。
 
 ## 兼容性
 
-- 在 DSH `0.2.2-rc.3`（Desktop profile，Web GUI）上验证：核心面板在隔离的 DSH home 里用全新 `web` profile 起真实 `dsh web` 进程实测——插件启动、host 路由均有响应（含 SSE 路由的 JSON 回退）、client bundle 正常 serve；之后新增的 `@` 路由（文件/目录 + 会话候选）与图片上传 / 读取路由由 host/client 单测覆盖，其中 `@` 合并路由与两个图片二进制路由另外在进程内真实 HTTP server 上验证过帧格式，会话 mention 的拼写也用已安装构建自带的解析器核对过；会话引用与图片输入尚未做 GUI 端到端实测，LaTeX display 环境的包裹由单测 + 真实 Markdown 解析器核对覆盖，同样没有 GUI 实测。
+- 在 DSH `0.2.2-rc.3`（Desktop profile，Web GUI）上做过验证，这是有记录的目标版本；当前 Desktop 构建是 `0.2.2-rc.5`——插件在该构建上安装并使用，其 composer 高度上限也按该构建重新核对过，但下面的实测没有在 rc.5 上重跑。核心面板在隔离的 DSH home 里用全新 `web` profile 起真实 `dsh web` 进程实测——插件启动、host 路由均有响应（含 SSE 路由的 JSON 回退）、client bundle 正常 serve；之后新增的 `@` 路由（文件/目录 + 会话候选）与图片上传 / 读取路由由 host/client 单测覆盖，其中 `@` 合并路由与两个图片二进制路由另外在进程内真实 HTTP server 上验证过帧格式，会话 mention 的拼写也用已安装构建自带的解析器核对过；会话引用与图片输入尚未做 GUI 端到端实测，LaTeX display 环境的包裹由单测 + 真实 Markdown 解析器核对覆盖，同样没有 GUI 实测。
 - 本包**未声明** `engines.dsh` / DSH peer 依赖，因此安装时没有版本阻断；这与「已验证版本」是两件事——更新的 DSH 版本未经验证。
 - 仅 Web 平台（`dsh.client.platform: web`），没有 CLI/TUI 界面。
 - Node.js `>= 22`；插件本身是零依赖 ESM，不 import 任何 `@deepseek-ai/*`。

@@ -264,9 +264,14 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress. The
-  script owns the textarea's height: it follows the draft up to the primary composer's
-  14-line cap (336px), bounded by half the panel's height, and scrolls inside only past
-  that cap; the stylesheet ships no competing height cap and no `field-sizing`.
+  script owns the textarea's height: on every draft change, and whenever the panel's width or
+  height changes (`ResizeObserver`), it resets `height: auto`, reads `scrollHeight`, and
+  writes the result inline — capped at the primary composer's 14-line cap (336px) and at half
+  the panel's height, so the box scrolls inside itself only past that cap. While the box
+  grows, a transcript that was pinned to the bottom stays pinned; a scrolled-up reader is not
+  moved. The stylesheet ships no competing height cap and no `field-sizing`; before the first
+  measurement it gives the box its one-line height with `overflow-y: auto`, so a restored
+  long draft still scrolls instead of being clipped.
 - Composer images: paste, drop and the picker add thumbnails to a rail above the textarea;
   each uploads immediately and carries `uploading` / `ready` / `error`; the send button is
   enabled with a ready image even when the text is empty. A pending row carries the same

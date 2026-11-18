@@ -32,15 +32,17 @@ README feature bullets must not restate semantic details that belong to USAGE/CO
 
 ## DSH coupling
 
-- Tested target: DSH `0.2.2-rc.3` (the installed Desktop build); no `engines.dsh` and no DSH
-  peer dependency is declared. Treat other DSH releases as untested. The source checkout used
-  for reference can lag the installed build — read the installed build out of
-  `app.asar` before trusting a source path.
+- Recorded test target: DSH `0.2.2-rc.3`. The current installed Desktop build is
+  `0.2.2-rc.5`: the plugin runs there and the composer's height cap was re-checked against
+  that build, but the full verification run has not been repeated. No `engines.dsh` and no
+  DSH peer dependency is declared, so treat other DSH releases as untested. The source
+  checkout used for reference lags both (currently `0.2.1-rc.2`) — read the installed build
+  out of `app.asar` before trusting a source path.
 - Image input reuses host services instead of importing DSH packages: `ctx.get('attachments')`
   (`saveImages`, `admitPromptContent` with the stored-image arm
   `{ type: 'image', attachment, encodedBytes }`, `readImage`, `isAttachmentError`,
-  `imageLimits`) plus `agent.followup` with image content blocks. The installed 0.2.2-rc.3
-  service contract was checked through Inspect; the DSH Remote APIs remain unusable because
+  `imageLimits`) plus `agent.followup` with image content blocks. The 0.2.2-rc.3 service
+  contract was checked through Inspect; the DSH Remote APIs remain unusable because
   the side session is `origin: 'subagent'` without `parentSession`.
 - The client bundle may only `require` modules in the shell's platform seed table
   (`react`, `react/jsx-runtime`, `@deepseek-ai/dsh-client-ui-primitives`, …). Do not import

@@ -2,8 +2,10 @@
 
 This is the semantic reference for `@flyer103/dsh-side-chat`: what a side chat inherits,
 what it isolates, what it may change, and what closing it destroys. It describes the current
-release line (tested on DSH `0.2.2-rc.3`); see [DESIGN.md](DESIGN.md) for rationale and
-[CONTRACT.md](CONTRACT.md) for the host/client wire contract.
+release line, verified against DSH `0.2.2-rc.3` and loaded by the current Desktop build
+`0.2.2-rc.5` (see [Compatibility](#compatibility) for what each claim covers); see
+[DESIGN.md](DESIGN.md) for rationale and [CONTRACT.md](CONTRACT.md) for the host/client wire
+contract.
 
 English | [中文](../README.zh.md)
 
@@ -11,7 +13,7 @@ English | [中文](../README.zh.md)
 
 | item | value |
 |---|---|
-| DSH | tested on `0.2.2-rc.3`; the host half is a plain ESM Cordis plugin |
+| DSH | verified on `0.2.2-rc.3`; also loaded by the current Desktop build `0.2.2-rc.5` (see Compatibility); the host half is a plain ESM Cordis plugin |
 | UI surface | Web GUI only (`dsh.client.platform: web`), as a native tab in the right Sidebar; includes the Desktop app window |
 | Node.js | `>= 22` for the repository and its tests; the plugin has no runtime dependencies |
 | profile | a normal DSH profile such as `desktop` or `web` |
@@ -34,6 +36,17 @@ Pick the profile you actually run: `desktop` for the Desktop application, or `we
 another profile you created) for a `dsh web` process. A profile is modified only when it is
 the one named here.
 
+### From npm
+
+```bash
+dsh plugin --profile desktop add @flyer103/dsh-side-chat
+dsh plugin --profile desktop add @flyer103/dsh-side-chat@0.10.2   # pin a release
+```
+
+The recommended path. The published package carries both halves as plain files, so there is
+no `prepare` script and no package-build approval; without a version suffix `add` installs
+the `latest` tag. Pin a version when you need reproducibility.
+
 ### From a local checkout
 
 ```bash
@@ -50,10 +63,11 @@ the command is safe; it reports `Already installed` instead of adding a duplicat
 dsh plugin --profile desktop add github:flyer103/dsh-side-chat
 ```
 
-This requires the repository to be pushed to GitHub first (the plugin is not published to
-npm). The repository has no build step and no `prepare` script, so no package build approval
-is needed. Use a pinned commit when you need reproducibility:
-`github:flyer103/dsh-side-chat#<commit>`.
+This installs from the repository instead of the registry — use it for an unreleased commit
+or when the registry is unreachable; the same package is published on npm (see above). It
+needs the repository to be reachable with `git`. There is no build step and no `prepare`
+script, so no package build approval is needed. Pin a commit or a released tag when you need
+reproducibility: `github:flyer103/dsh-side-chat#<commit>` (or `#v0.10.2`).
 
 ### From a tarball
 
@@ -75,7 +89,9 @@ node scripts/install.mjs --profile desktop --uninstall
 
 The script wraps the same `dsh plugin` commands, verifies that
 `dsh --profile <name> --dump-config` composes the `dsh-side-chat` row, never restarts
-DSH, and never edits the profile's `cordis.patch.yml`.
+DSH, and never edits the profile's `cordis.patch.yml`. The `desktop` profile is the
+exception: the launcher refuses to dump it (see [Verify and restart](#verify-and-restart)),
+so the script reports that it could not verify the composed row and leaves the check to you.
 
 ### Desktop profile note
 
@@ -86,8 +102,11 @@ been initialized once by opening the app.
 
 ### Verify and restart
 
+For a profile you boot yourself (`web`, or a profile of your own), ask the launcher to
+compose it and look for the inserted row:
+
 ```bash
-dsh --profile desktop --dump-config | grep -A2 '== @flyer103/dsh-side-chat'
+dsh --profile web --dump-config | grep -A2 '== @flyer103/dsh-side-chat'
 ```
 
 You should see the inserted row:
@@ -95,6 +114,20 @@ You should see the inserted row:
 ```yaml
 - id: dsh-side-chat
   name: '@flyer103/dsh-side-chat'
+```
+
+The `desktop` profile cannot be dumped from the CLI: the launcher answers `error: profile
+"desktop" is managed exclusively by the Electron application` for any boot command, with or
+without the app running. Check it in the Desktop app's Plugins page instead, or read the
+profile manifest — the dependency and the bundle row must both name the package:
+
+```bash
+grep -n 'dsh-side-chat' ~/.dsh/profiles/desktop/package.json
+```
+
+```text
+"@flyer103/dsh-side-chat": "link:/path/to/dsh-side-chat",   // dependencies
+"@flyer103/dsh-side-chat",                                  // dsh.profile.bundles
 ```
 
 Restart DSH (quit and reopen the Desktop app, or restart the `dsh web` process). The
@@ -504,6 +537,10 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
   installed build's own parser; and the LaTeX display-environment wrap is covered by client
   unit tests plus a real micromark parse of the normalized text. None of these has been
   exercised in a real-process GUI.
+- The current Desktop build is `0.2.2-rc.5`. The plugin is installed and used there, and the
+  composer's height cap was re-checked against that build's own stylesheet (`336px`); the
+  verification run above has not been repeated on rc.5, so treat rc.3 as the tested version
+  and rc.5 as the build this release line currently runs on.
 - Web platform only, and the entry point is the right sidebar's tab system
   (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). There is no CLI/TUI UI for the tab; the host
   routes exist whenever the profile loads the plugin.
@@ -538,9 +575,13 @@ no history to migrate. If you installed into a throwaway profile, delete
 
 **The right sidebar's guide page has no 「侧边会话」 card.**
 
-1. Confirm the bundle is composed: `dsh --profile <name> --dump-config | grep -A2 dsh-side-chat`.
-   If nothing shows, the package is not in `dsh.profile.bundles`; re-run the install command
-   for the profile you actually run (`desktop` for the Desktop app, `web` for a web process).
+1. Confirm the bundle is composed. For a profile you boot yourself:
+   `dsh --profile <name> --dump-config | grep -A2 dsh-side-chat`. The `desktop` profile
+   refuses `--dump-config` (the Electron app owns it), so check the app's Plugins page or
+   list the profile's dependencies: `grep -n dsh-side-chat ~/.dsh/profiles/desktop/package.json`
+   must show both the dependency and the `dsh.profile.bundles` entry. If nothing shows,
+   re-run the install command for the profile you actually run (`desktop` for the Desktop
+   app, `web` for a web process).
 2. Restart DSH. A change made while the profile was running is not guaranteed to load
    without a restart, and the `web` profile is startup-only.
 3. Expand the current session's right sidebar with 「Open sidebar」. If the sidebar already
@@ -593,6 +634,16 @@ snapshot polling for that tab; replies then arrive at poll granularity or, at wo
 they commit. Reload the page to retry the stream. If streaming never works, check the
 browser devtools network panel: `/side-chat/api/events` should be an open request with
 `text/event-stream`, and the host log should show no route registration warning.
+
+**The draft box never grows past one line.**
+
+Since 0.10.2 the composer owns its height by measuring the draft (`fitComposerHeight`)
+instead of relying on CSS, so a one-line box with an inner scrollbar means an older client
+half is still loaded. Restart DSH, reopen a side-chat tab, and check the installed copy —
+`grep '"version"' ~/.dsh/profiles/desktop/node_modules/@flyer103/dsh-side-chat/package.json`
+should read `0.10.2` or later (for a `link:` install that file is the checkout itself).
+Releases before 0.10.2 capped the box at 150 px where `field-sizing` applied and could not
+grow at all where it did not.
 
 **`dsh plugin --profile desktop add ...` fails.**
 
