@@ -305,13 +305,22 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   assistant row's `.sc-md-block` re-decorates as chunks arrive. Chips are hidden until the
   host is hovered or focused and stay visible on coarse pointers; the chip label comes from
   `markdown.tableCopy` / `markdown.tableCopied` (fences reuse `markdown.copy` /
-  `markdown.copied`). A click writes the rendered grid as TSV (row `\n`, cell `\t`,
-  whitespace collapsed per cell) through `navigator.clipboard`, falling back to a temporary
-  textarea plus `execCommand('copy')`; a successful write shows the copied label for
-  `COPY_FEEDBACK_MS` (1200 ms), a rejected write shows nothing. Known limits: the chip is a
-  node React does not own (appended last, positioned absolutely so DOM order never matters),
-  a wide table that scrolls horizontally carries the chip with its content, and the payload
-  is rendered text, so emphasis and inline-code markup are not preserved.
+  `markdown.copied`). A click reads the rendered grid at click time into one
+  `ClipboardItem` with two flavours: `text/plain` is TSV (row `\n`, cell `\t`, whitespace
+  collapsed per cell) for spreadsheets, and `text/html` is the same grid as a `<table>`
+  whose leading all-`th` row becomes `<thead>` and whose cell text is escaped (`&`, `<`,
+  `>`, `"`) with whitespace collapsed. The HTML flavour is what makes a rich-text target
+  (Feishu docs, Word, browser editors) paste a real table; those targets read only
+  `text/plain` when it is absent and paste one run of tab-separated text instead. The
+  write goes through `navigator.clipboard.write` and falls back to `writeText` with the
+  TSV payload when `ClipboardItem` is missing or the item is rejected, then to a temporary
+  textarea plus `execCommand('copy')`; code fences write their text only. A successful
+  write shows the copied label for `COPY_FEEDBACK_MS` (1200 ms), a rejected write shows
+  nothing. Known limits: the chip is a node React does not own (appended last, positioned
+  absolutely so DOM order never matters), a wide table that scrolls horizontally carries
+  the chip with its content, and both flavours carry rendered text, so emphasis,
+  inline-code and link markup are not preserved, and a pasted table keeps no cell styling
+  beyond header cells.
 
 ### Reference completion (`@`)
 

@@ -275,8 +275,10 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   spelling never enters math on its own; streaming text, code fences, existing math and an
   indented or unclosed environment stay literal, as does a `\[…\]` that does not start a
   line. Hovering a table reveals a **复制表格** / **Copy table** chip that puts the rendered
-  grid on the clipboard as tab-separated text (paste it straight into a spreadsheet); the
-  fallback renderer's code fences get the same copy chip.
+  grid on the clipboard both as an HTML table and as tab-separated text: a rich-text
+  target — Feishu docs, Word, a browser editor — pastes it as a real table, and a
+  spreadsheet pastes it as cells; the fallback renderer's code fences get the same copy
+  chip.
 - Composer: `Enter` sends, `Shift+Enter` inserts a newline. The send button becomes
   **Stop** while a turn is running and the composer is empty; typing a draft turns it back
   into Send, and the message queues behind the running turn.
@@ -537,6 +539,10 @@ racing `close`/`prompt` returns `not-found` rather than double-freeing.
   installed build's own parser; and the LaTeX display-environment wrap is covered by client
   unit tests plus a real micromark parse of the normalized text. None of these has been
   exercised in a real-process GUI.
+- The table copy chip's clipboard payload is covered by client unit tests: both flavours
+  (`text/html` table and `text/plain` TSV), the escaping and header handling, and the
+  text-only fallback used when the browser rejects the combined item. A manual paste into a
+  rich-text target such as Feishu docs or Word has not been recorded.
 - The current Desktop build is `0.2.2-rc.5`. The plugin is installed and used there, and the
   composer's height cap was re-checked against that build's own stylesheet (`336px`); the
   verification run above has not been repeated on rc.5, so treat rc.3 as the tested version
@@ -715,10 +721,12 @@ is about a dependency, not this plugin.
   that preference.
 - **The table copy chip belongs to the rendered DOM, not to Markdown text.** It is appended
   by the plugin after the shell renders, so it follows the rendered grid: a wide table that
-  scrolls horizontally carries the chip with its content, and the clipboard payload is the
-  rendered cell text (whitespace collapsed, one line per row, one tab per column), so bold,
-  inline code and link markup are not preserved. A message that switches locale re-labels an
-  idle chip; a chip that is mid-confirmation keeps its label until the 1.2 s window ends.
+  scrolls horizontally carries the chip with its content. The clipboard carries the rendered
+  cell text in two flavours (an HTML `<table>` plus tab-separated plain text), so bold,
+  inline code and link markup are not preserved and a pasted table keeps no cell styling
+  beyond header cells; a target that reads only plain text (or a browser that refuses the
+  combined write) still gets the tab-separated grid. A message that switches locale re-labels
+  an idle chip; a chip that is mid-confirmation keeps its label until the 1.2 s window ends.
 - The tab is Web-only, and the plugin is not a replacement for the native conversation UI.
 
 ## File map

@@ -1278,7 +1278,9 @@ function createFakeElement(tagName) {
 
 function createTableElement(rows) {
   const table = createFakeElement('table')
-  table.rows = rows.map((cells) => ({ cells: cells.map((text) => ({ textContent: text })) }))
+  table.rows = rows.map((cells, rowIndex) => ({
+    cells: cells.map((text) => ({ textContent: text, tagName: rowIndex === 0 ? 'TH' : 'TD' }))
+  }))
   return table
 }
 
@@ -1307,18 +1309,26 @@ function createCopyTargets() {
 }
 
 /** Install the document/navigator face a copy click needs; returns a restore function. */
-function installCopyGlobals(writeText) {
+function installCopyGlobals(writeText, write) {
   const previousDocument = globalThis.document
   // Node 21+ exposes `navigator` as a getter-only global, so an assignment throws.
   const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const previousClipboardItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem')
   globalThis.document = { createElement: (tag) => createFakeElement(tag) }
   Object.defineProperty(globalThis, 'navigator', {
-    value: { clipboard: { writeText } },
+    value: { clipboard: write === undefined ? { writeText } : { writeText, write } },
     configurable: true,
     writable: true
   })
+  if (write !== undefined) {
+    globalThis.ClipboardItem = class {
+      constructor(data) { this.data = data }
+    }
+  }
   return () => {
     globalThis.document = previousDocument
+    if (previousClipboardItem === undefined) delete globalThis.ClipboardItem
+    else Object.defineProperty(globalThis, 'ClipboardItem', previousClipboardItem)
     if (previousNavigator === undefined) delete globalThis.navigator
     else Object.defineProperty(globalThis, 'navigator', previousNavigator)
   }
@@ -1330,6 +1340,82 @@ test('copy helpers flatten cells, rows and whitespace into a TSV payload', () =>
   assert.equal(exports.normalizeCellText(undefined), '')
   assert.equal(exports.tableToTsv([['a', ' b '], ['1\n2', null]]), 'a\tb\n1 2\t')
   assert.equal(exports.tableToTsv([]), '')
+})
+
+test('copy helpers render the same grid as an escaped HTML table', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.tableToHtml([]), '')
+  assert.equal(
+    exports.tableToHtml([
+      [{ text: '位置', header: true }, { text: '改动', header: true }],
+      [{ text: '<a> & "b"', header: false }, { text: '1\n2', header: false }]
+    ]),
+    '<table><thead><tr><th>位置</th><th>改动</th></tr></thead>'
+      + '<tbody><tr><td>&lt;a&gt; &amp; &quot;b&quot;</td><td>1 2</td></tr></tbody></table>'
+  )
+  assert.equal(
+    exports.tableToHtml([[{ text: 'x', header: true }], [{ text: 'y', header: true }]]),
+    '<table><thead><tr><th>x</th></tr></thead><tbody><tr><th>y</th></tr></tbody></table>',
+    'only a leading all-header row becomes thead'
+  )
+})
+
+test('the table chip writes an HTML table beside the TSV payload', async (t) => {
+  const { exports } = loadBundle()
+  const { root, tableHost } = createCopyTargets()
+  const items = []
+  let textWrites = 0
+  const restore = installCopyGlobals(
+    async () => { textWrites += 1 },
+    async (batch) => { items.push(...batch) }
+  )
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const labels = { table: { copy: '复制表格', copied: '已复制' }, code: { copy: '复制', copied: '复制成功' } }
+    exports.decorateCopyChips(root, labels)
+    const chip = tableHost.children[1]
+    chip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(textWrites, 0, 'the rich payload is not downgraded to writeText')
+    assert.equal(items.length, 1)
+    assert.equal(items[0].data['text/plain'].type, 'text/plain')
+    assert.equal(items[0].data['text/html'].type, 'text/html')
+    assert.equal(await items[0].data['text/plain'].text(), '位置\t改动\n§1\ta b')
+    assert.equal(
+      await items[0].data['text/html'].text(),
+      '<table><thead><tr><th>位置</th><th>改动</th></tr></thead>'
+        + '<tbody><tr><td>§1</td><td>a b</td></tr></tbody></table>'
+    )
+    assert.equal(chip.textContent, '已复制')
+    t.mock.timers.tick(exports.COPY_FEEDBACK_MS)
+  } finally {
+    t.mock.timers.reset()
+    restore()
+  }
+})
+
+test('a clipboard item the browser rejects falls back to the TSV text', async (t) => {
+  const { exports } = loadBundle()
+  const { root, tableHost } = createCopyTargets()
+  const writes = []
+  const restore = installCopyGlobals(
+    async (text) => { writes.push(text) },
+    async () => { throw new Error('html denied') }
+  )
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const labels = { table: { copy: '复制表格', copied: '已复制' }, code: { copy: '复制', copied: '复制成功' } }
+    exports.decorateCopyChips(root, labels)
+    const chip = tableHost.children[1]
+    chip.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(writes, ['位置\t改动\n§1\ta b'])
+    assert.equal(chip.textContent, '已复制', 'the TSV fallback still confirms the copy')
+    t.mock.timers.tick(exports.COPY_FEEDBACK_MS)
+  } finally {
+    t.mock.timers.reset()
+    restore()
+  }
 })
 
 test('decorateCopyChips adds one localized chip per table and copies TSV', async (t) => {
