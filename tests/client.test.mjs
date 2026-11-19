@@ -4030,3 +4030,28 @@ test('the composer allows sending with a ready image and no text', () => {
   assert.equal(send.props['aria-label'], '发送')
   assert.equal(send.props.className, 'sc-send')
 })
+
+
+test('the pending row shows the formatted time instead of the raw epoch', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const time = 1700000000000
+  const state = panelState({ pending: [{ id: 'p1', text: 'still thinking', time }] })
+  const bodyElement = bodyRegistration.component({
+    ...props,
+    runtime: panelRuntime(state),
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  let tree = bodyElement
+  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) {
+    tree = tree.type(tree.props)
+  }
+  const pendingElement = findElement(tree, (element) => typeof element.type === 'function'
+    && element.props !== undefined && element.props.pending !== undefined)
+  assert.ok(pendingElement !== undefined, 'the pending row renders')
+  const rowTree = pendingElement.type(pendingElement.props)
+  const meta = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-meta')
+  const text = String(Array.isArray(meta.children) ? meta.children[0] : meta.children)
+  assert.ok(!text.includes(String(time)), `the raw epoch must not leak: ${text}`)
+  assert.match(text, /^\d{2}:\d{2} · /, `the row shows the formatted clock time: ${text}`)
+})
