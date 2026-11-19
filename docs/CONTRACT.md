@@ -231,6 +231,15 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   that side session and leaves the other side chats and the parent session untouched.
 - Body props: `sessionId` (parent session) plus the framework-injected `useTabInfo()`; the
   tab instance id from `useTabInfo()` is what makes the identity per-tab.
+- **Pending user questions.** The client observes the forwarded `user-questions/request`
+  waterfall (allowlisted in `dsh-api-remotes`, subscribed through `ctx.remote.$on`). The
+  handler reads the parent session from `ctx.sessions.scopeOf(this)`, stores at most the
+  latest request per parent session in the client runtime, and always delegates with
+  `next()`; it never claims, answers or delays the request. A card renders above the
+  transcript with each question, its detail and option labels, a **Discuss in side chat**
+  action that writes the flattened text into that tab's composer draft, and a dismiss
+  action that clears the local copy. No host route and no session event is created by
+  observing; `remote` and `sessions` are part of the client `inject` list.
 
 ## Rendering contract (client)
 
