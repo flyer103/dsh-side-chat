@@ -181,6 +181,8 @@ function createCtxStub() {
   const tabTypes = []
   const closeHandlers = []
   const remoteListeners = []
+  const interactionDefs = []
+  const openedTabs = []
   const locale = createLocaleStub()
   const ctx = {
     locale,
@@ -210,6 +212,17 @@ function createCtxStub() {
       registerCloseHandler(kind, handler) {
         closeHandlers.push({ kind, handler })
         return () => {}
+      },
+      openTab(kind) {
+        openedTabs.push(kind)
+      }
+    },
+    uiConversation: {
+      interactions: {
+        register(definition) {
+          interactionDefs.push(definition)
+          return () => {}
+        }
       }
     },
     remote: {
@@ -224,7 +237,7 @@ function createCtxStub() {
       }
     }
   }
-  return { ctx, disposers, registered, injected, tabTypes, closeHandlers, locale, remoteListeners }
+  return { ctx, disposers, registered, injected, tabTypes, closeHandlers, locale, remoteListeners, interactionDefs, openedTabs }
 }
 
 function applyBundle(exports) {
@@ -596,7 +609,7 @@ test('bundle registers the package id and exports the sidebar plugin face', () =
   assert.equal(registration.id, '@flyer103/dsh-side-chat')
   assert.equal(typeof registration.factory, 'function')
   assert.equal(exports.name, 'dsh-side-chat')
-  assert.deepEqual(exports.inject, ['slots', 'sidebarRight', 'sidebarRightTabs', 'locale', 'remote', 'sessions'])
+  assert.deepEqual(exports.inject, ['slots', 'sidebarRight', 'sidebarRightTabs', 'locale', 'remote', 'sessions', 'uiConversation'])
   assert.equal(typeof exports.apply, 'function')
 })
 
@@ -623,8 +636,8 @@ test('apply registers the sidebar tab type, the localized body slot and the clos
   const { exports } = loadBundle()
   const { registered, injected, tabTypes, closeHandlers, locale } = applyBundle(exports)
 
-  assert.deepEqual(injected, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'])
-  assert.equal(registered.length, 2)
+  assert.deepEqual(injected, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title', 'conversation.chat.text-interaction', 'shell.overlay'])
+  assert.equal(registered.length, 4)
   const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
   const title = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title')
   assert.ok(body !== undefined, 'tab body slot must be registered')
@@ -658,13 +671,95 @@ test('apply registers the sidebar tab type, the localized body slot and the clos
   assert.equal(typeof closeHandlers[0].handler, 'function')
 })
 
-test('apply no longer registers the header button or the shell overlay', () => {
+test('selection admission accepts only real selections and opens the surface', () => {
+  const { exports } = loadBundle()
+  const { interactionDefs } = applyBundle(exports)
+  assert.equal(interactionDefs.length, 1)
+  const definition = interactionDefs[0]
+  assert.equal(definition.id, exports.SELECTION_INTERACTION_ID)
+  let opened = 0
+  const open = () => { opened += 1 }
+  let prevented = 0
+  definition.onInteraction(undefined)
+  definition.onInteraction({ trigger: 'contextmenu', hasSelection: false, readText: () => 'text', open })
+  definition.onInteraction({ trigger: 'selection', hasSelection: false, readText: () => 'text', open })
+  definition.onInteraction({ trigger: 'selection', hasSelection: true, readText: () => '   ', open })
+  assert.equal(opened, 0)
+  definition.onInteraction({ trigger: 'selection', hasSelection: true, readText: () => 'picked text', open })
+  assert.equal(opened, 1)
+  definition.onInteraction({
+    trigger: 'contextmenu',
+    hasSelection: true,
+    readText: () => 'picked text',
+    open,
+    preventDefault: () => { prevented += 1 },
+  })
+  assert.equal(opened, 2, 'the context-menu gesture also admits the action')
+  assert.equal(prevented, 1, 'the native context menu is suppressed while dispatching')
+})
+
+test('selectionDraftText quotes the selection and leaves the caret on the next line', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.selectionDraftText('picked text'), '> picked text\n')
+  assert.equal(exports.selectionDraftText('first\nsecond').toString(), '> first\n> second\n')
+  assert.equal(exports.selectionDraftText('start\n\nend'), '> start\n>\n> end\n')
+  assert.equal(exports.selectionDraftText('trailing\n\n'), '> trailing\n')
+  assert.equal(exports.selectionDraftText(''), '')
+  assert.equal(exports.selectionDraftText(undefined), '')
+})
+
+test('the selection action queues the text and opens a new side chat tab', () => {
+  const { exports } = loadBundle()
+  const { registered, openedTabs } = applyBundle(exports)
+  const surface = registered.find((entry) => entry.options.name === 'conversation.chat.text-interaction')
+  assert.ok(surface !== undefined, 'text-interaction surface must be registered')
+  assert.equal(surface.options.key, exports.SELECTION_INTERACTION_ID)
+  assert.equal(surface.options.locale, NS)
+  const face = surface.options.inject('session-1')
+  assert.equal(typeof face.open, 'function')
+  let dismissed = 0
+  const tree = surface.component({
+    ...face,
+    t: (key) => exports.ZH_DICT[key],
+    dismiss: () => { dismissed += 1 },
+    readText: () => 'picked text'
+  })
+  assert.equal(tree.type, 'button')
+  assert.equal(tree.className, undefined)
+  assert.equal(tree.props['aria-label'], '在侧边对话中提问')
+  tree.props.onClick()
+  assert.equal(dismissed, 1)
+  assert.deepEqual(openedTabs, [exports.SIDE_CHAT_KIND])
+  const body = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const runtime = body.options.inject('session-1').runtime
+  runtime.open('tab-1', 'session-1')
+  assert.equal(runtime.getState('tab-1').draft, '> picked text\n')
+  assert.equal(runtime.getState('tab-1').focusRequest, 1, 'the queued selection asks for composer focus')
+  assert.equal(runtime.getState('tab-1').composerCaret, '> picked text\n'.length)
+})
+
+test('requestDraft queues text for the next mounted side chat only', () => {
+  const { runtime } = createRuntimeWith(createFetchStub({}))
+  assert.equal(runtime.requestDraft('   '), false)
+  assert.equal(runtime.requestDraft('hello'), true)
+  runtime.open('tab-1', 'session-1')
+  assert.equal(runtime.getState('tab-1').draft, 'hello')
+  runtime.open('tab-2', 'session-1')
+  assert.equal(runtime.getState('tab-2').draft, '')
+})
+
+test('apply keeps the old header/button surfaces out and mounts only the companion overlay', () => {
   const { exports } = loadBundle()
   const { registered, injected } = applyBundle(exports)
   assert.equal(injected.includes('conversation.session.header.actions'), false)
-  assert.equal(injected.includes('shell.overlay'), false)
+  assert.equal(injected.includes('shell.overlay'), true)
   assert.equal(registered.some((entry) => entry.options.id === 'side-chat.toggle'), false)
   assert.equal(registered.some((entry) => entry.options.id === 'side-chat.panel'), false)
+  const companion = registered.find((entry) => entry.options.id === 'side-chat.ask-companion')
+  assert.ok(companion !== undefined, 'the companion overlay registers')
+  assert.equal(companion.options.name, 'shell.overlay')
+  assert.equal(companion.options.order, 100)
+  assert.equal(typeof companion.component, 'function')
 })
 
 test('the injected tab body props carry the runtime, translator and locale face', () => {
@@ -794,7 +889,9 @@ test('apply injects the stylesheet with the dsh-side-chat marker and sc- classes
   assert.ok(style.textContent.includes('.sc-statusbar'))
   assert.ok(style.textContent.includes('.sc-error-detail'))
   assert.equal(style.textContent.includes('.sc-panel'), false, 'the floating panel root must be gone')
-  assert.equal(style.textContent.includes('position: fixed'), false, 'no floating positioning in the tab body')
+  assert.equal(style.textContent.includes('position: fixed'), false, 'nothing in the panel floats')
+  assert.ok(style.textContent.includes('[data-text-interaction-surface].sc-ask-surface'), 'the companion styles the shared selection pill')
+  assert.ok(style.textContent.includes('.sc-ask-segment'), 'the companion contributes its segment rule')
   assert.equal(style.textContent.includes('min(460px'), false, 'no floating width in the tab body')
   assert.equal(style.textContent.includes('.sc-toggle'), false, 'the header toggle style must be gone')
   const classTokens = [...style.textContent.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map((match) => match[1])
@@ -4262,6 +4359,14 @@ test('the question card ships its stylesheet rules and keeps PANEL_CSS balanced'
   assert.ok(css.includes('.sc-question {'), 'the card needs its container rule')
   assert.ok(css.includes('.sc-question-discuss {'), 'the discuss action needs its rule')
   assert.ok(css.includes('.sc-question-dismiss'), 'the dismiss action needs its rule')
+})
+
+test('the selection action ships its stylesheet and keeps PANEL_CSS balanced', () => {
+  const { exports } = loadBundle()
+  const css = exports.PANEL_CSS
+  assert.ok(css.includes('.sc-ask-action {'), 'the selection action needs its rule')
+  assert.ok(css.includes('.sc-ask-action:focus-visible'),
+    'the focus rule must stay inside the sheet: a missing brace makes browsers swallow the rest')
   let depth = 0
   for (const ch of css) {
     if (ch === '{') depth += 1
