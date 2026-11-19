@@ -4030,3 +4030,113 @@ test('the composer allows sending with a ready image and no text', () => {
   assert.equal(send.props['aria-label'], '发送')
   assert.equal(send.props.className, 'sc-send')
 })
+
+
+function renderBodyDom(bodyRegistration, props) {
+  let tree = bodyRegistration.component(props)
+  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) {
+    tree = tree.type(tree.props)
+  }
+  return tree
+}
+
+test('assistant replies offer quote-into-main-chat when the composer seat is wired', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const inserted = []
+  const inputActions = { insertQuote: (text) => { inserted.push(text); return true } }
+  const state = panelState({
+    sessionId: 'side-1',
+    nodes: [{
+      kind: 'assistant',
+      seq: 2,
+      blocks: [{ kind: 'text', text: 'first answer' }, { kind: 'text', text: 'second answer' }]
+    }]
+  })
+  const tree = renderBodyDom(bodyRegistration, {
+    ...props,
+    runtime: panelRuntime(state),
+    inputActions,
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const rows = []
+  collectElements(tree, (element) => {
+    if (typeof element.type === 'function' && Array.isArray(element.props === undefined ? undefined : element.props.blocks)) rows.push(element)
+  })
+  assert.equal(rows.length, 1, 'one committed assistant row renders')
+  const rowTree = rows[0].type(rows[0].props)
+  const button = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-return-btn')
+  assert.ok(button !== undefined, 'the return action must render for a committed reply')
+  assert.equal(button.props['aria-label'], 'return.action')
+  button.props.onClick()
+  assert.deepEqual(inserted, ['first answer\n\nsecond answer'])
+})
+
+test('the return action hides without inputActions or a non-empty committed reply', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const base = {
+    ...props,
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  }
+  const renderAssistantRow = (inputActions, text) => {
+    const state = panelState({
+      sessionId: 'side-1',
+      nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text }] }]
+    })
+    const tree = renderBodyDom(bodyRegistration, { ...base, runtime: panelRuntime(state), inputActions })
+    let row = null
+    collectElements(tree, (element) => {
+      if (row === null && typeof element.type === 'function' && Array.isArray(element.props === undefined ? undefined : element.props.blocks)) row = element
+    })
+    assert.ok(row !== null, 'one committed assistant row renders')
+    return row.type(row.props)
+  }
+  assert.equal(findElement(renderAssistantRow(undefined, 'text'), (element) => element.props !== undefined && element.props.className === 'sc-return-btn'), undefined)
+  assert.equal(findElement(renderAssistantRow({ insertQuote: () => true }, '   '), (element) => element.props !== undefined && element.props.className === 'sc-return-btn'), undefined)
+})
+
+test('streaming replies do not offer the return action while committed rows keep it', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const state = panelState({
+    sessionId: 'side-1',
+    nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: 'committed text' }] }],
+    live: {
+      revision: 1,
+      activeAttempt: { attemptId: 'attempt-1', turn: 1, step: 1, nextIndex: 1, blocks: [{ kind: 'text', text: 'live text' }] }
+    },
+    running: true,
+    streaming: true
+  })
+  const tree = renderBodyDom(bodyRegistration, {
+    ...props,
+    runtime: panelRuntime(state),
+    inputActions: { insertQuote: () => true },
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  const rows = []
+  collectElements(tree, (element) => {
+    if (typeof element.type === 'function' && Array.isArray(element.props === undefined ? undefined : element.props.blocks)) rows.push(element)
+  })
+  assert.equal(rows.length, 2, 'the committed row and the live row both render')
+  const committed = rows.find((row) => row.props.streaming !== true)
+  const live = rows.find((row) => row.props.streaming === true)
+  assert.ok(committed !== undefined && live !== undefined)
+  assert.ok(findElement(committed.type(committed.props), (element) => element.props !== undefined && element.props.className === 'sc-return-btn') !== undefined)
+  assert.equal(findElement(live.type(live.props), (element) => element.props !== undefined && element.props.className === 'sc-return-btn'), undefined)
+})
+
+
+test('the return action ships its stylesheet rules and keeps PANEL_CSS balanced', () => {
+  const { exports } = loadBundle()
+  const css = exports.PANEL_CSS
+  assert.ok(css.includes('.sc-return {'), 'the quote action needs its row rule')
+  assert.ok(css.includes('.sc-return-btn {'), 'the quote action needs its button rule')
+  let depth = 0
+  for (const ch of css) {
+    if (ch === '{') depth += 1
+    else if (ch === '}') depth -= 1
+  }
+  assert.equal(depth, 0, 'PANEL_CSS braces must balance')
+})

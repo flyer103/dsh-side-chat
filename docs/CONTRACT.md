@@ -261,6 +261,13 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   defensively on a matching settlement `event`), issuing one snapshot catch-up so a
   settlement is never lost. The thinking indicator shows only while a turn runs with no
   visible live blocks.
+- Committed assistant rows expose a **Quote into main chat** action (locale key
+  `return.action`, switching to `return.done` after a press) when the tab body's standard
+  `inputActions` seat is present. The press calls `inputActions.insertQuote` with the row's
+  text blocks joined by blank lines, so the text becomes a Markdown blockquote in the main
+  session's composer draft; it never sends, never touches the side session and never needs a
+  host route. The action is omitted for live streaming rows, for blank replies, and when
+  `inputActions`/`insertQuote` is unavailable (the body stays usable in a plain slot host).
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress. The

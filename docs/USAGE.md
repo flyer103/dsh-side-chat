@@ -157,6 +157,16 @@ A side chat is created lazily. Opening and closing a tab without sending a messa
 no session, no model request, and no cost — opening any number of tabs costs nothing until
 each one sends.
 
+## Return a reply to the main chat
+
+Every completed assistant reply in a side chat carries a small **Quote into main chat**
+action under its text. Pressing it inserts the reply as a Markdown quote into the main
+session's composer draft — review, edit, or send it there; nothing is sent by the press and
+the side chat keeps its own transcript. Streaming replies and blank replies carry no action;
+if the shell does not offer the composer input seat (a plain slot host), the action is
+absent. Only the reply's text blocks cross over; reasoning folds and tool output stay in the
+side chat.
+
 ## Inheritance semantics
 
 ### Completed-turn seed
