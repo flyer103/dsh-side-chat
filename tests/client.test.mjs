@@ -2318,8 +2318,8 @@ test('one parent session drives one independent side conversation per side-chat 
   await runtime.send(second, 'hello second')
 
   assert.deepEqual(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}create`).map((call) => call.body), [
-    { sourceId: 'main-1', instanceKey: first },
-    { sourceId: 'main-1', instanceKey: second }
+    { sourceId: 'main-1', instanceKey: first, lookup: true },
+    { sourceId: 'main-1', instanceKey: second, lookup: true }
   ])
   assert.equal(runtime.getState(first).sessionId, 'side-a')
   assert.equal(runtime.getState(second).sessionId, 'side-b')
@@ -4205,6 +4205,14 @@ function expandPanelBody(bodyElement) {
   return tree
 }
 
+function renderPanelDom(bodyRegistration, props) {
+  let tree = bodyRegistration.component(props)
+  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) {
+    tree = tree.type(tree.props)
+  }
+  return tree
+}
+
 test('the side chat renders the observed question and can discuss or dismiss it', () => {
   const { bodyRegistration, props } = panelRenderer()
   const calls = []
@@ -4253,6 +4261,67 @@ test('no question card renders without an observed request', () => {
   })
   const tree = expandPanelBody(bodyElement)
   assert.equal(findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-question'), undefined)
+})
+
+
+test('toggleLookup gates the create request and stops mattering after creation', async () => {
+  const { exports } = loadBundle()
+  const fetchStub = createFetchStub({
+    create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
+    prompt: { ok: true },
+    snapshot: { ok: true, inheritedEventCount: 0, running: false, status: 'idle', lastError: null, entries: [] }
+  })
+  const { runtime } = createRuntimeWith(fetchStub)
+  const id = exports.instanceKeyOf('main-1', 'tab-a')
+  runtime.open(id, 'main-1')
+  assert.equal(runtime.getState(id).lookup, true)
+  runtime.toggleLookup(id)
+  assert.equal(runtime.getState(id).lookup, false)
+  runtime.setVisible(id, true)
+  await runtime.send(id, 'hello')
+  assert.deepEqual(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}create`).map((call) => call.body), [
+    { sourceId: 'main-1', instanceKey: id, lookup: false }
+  ])
+  runtime.toggleLookup(id)
+  assert.equal(runtime.getState(id).lookup, false, 'a created side session keeps the allowance it was born with')
+})
+
+test('the status bar exposes the parent-lookup toggle only before the session exists', () => {
+  const { bodyRegistration } = panelRenderer()
+  const calls = []
+  const renderToggle = (state) => {
+    const runtime = { ...panelRuntime(state, calls), toggleLookup: (id) => calls.push(['toggleLookup', id]) }
+    const tree = renderPanelDom(bodyRegistration, {
+      runtime,
+      sessionId: 'main-1',
+      t: (key) => key,
+      useTabInfo: () => ({ tab: { visible: true } })
+    })
+    return findElement(tree, (element) => element.props !== undefined
+      && typeof element.props.className === 'string' && element.props.className.startsWith('sc-lookup'))
+  }
+  const toggle = renderToggle(panelState({ lookup: true }))
+  assert.ok(toggle !== undefined, 'blank tabs render the toggle')
+  assert.equal(toggle.props['aria-label'], 'lookup.on')
+  toggle.props.onClick()
+  assert.equal(calls.filter((call) => call[0] === 'toggleLookup').length, 1)
+  const off = renderToggle(panelState({ lookup: false }))
+  assert.equal(off.props['aria-label'], 'lookup.off')
+  assert.equal(renderToggle(panelState({ lookup: true, sessionId: 'side-1' })), undefined, 'created tabs hide the toggle')
+})
+
+
+test('the parent-lookup toggle ships its stylesheet and keeps PANEL_CSS balanced', () => {
+  const { exports } = loadBundle()
+  const css = exports.PANEL_CSS
+  assert.ok(css.includes('.sc-lookup {'), 'the toggle needs its rule')
+  assert.ok(css.includes('.sc-lookup-off'), 'the off state needs its rule')
+  let depth = 0
+  for (const ch of css) {
+    if (ch === '{') depth += 1
+    else if (ch === '}') depth -= 1
+  }
+  assert.equal(depth, 0, 'PANEL_CSS braces must balance')
 })
 
 

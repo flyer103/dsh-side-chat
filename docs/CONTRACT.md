@@ -23,7 +23,7 @@ raw bytes instead of JSON.
 
 | path | request | response |
 |---|---|---|
-| `/side-chat/api/create` | `{ sourceId, instanceKey? }` | `{ ok: true, sessionId, inheritedEventCount }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/create` | `{ sourceId, instanceKey?, lookup? }` | `{ ok: true, sessionId, inheritedEventCount }` \| `{ ok: false, code, message }` |
 | `/side-chat/api/prompt` | `{ sessionId, text, attachments? }` | `{ ok: true }` \| `{ ok: false, code, message, reason? }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
@@ -31,6 +31,15 @@ raw bytes instead of JSON.
 | `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
 | `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |
 | `/side-chat/api/references` | `{ sourceId?, sessionId?, query, quoted? }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' } \| { kind: 'session', sessionId, label, mention, location?: string \| null, createdAt }] }` \| `{ ok: false, code, message? }` |
+
+`lookup` (optional, default `true`) allows the side agent to read the main conversation
+on demand. Unless it is `false`, the created session's agent scope registers the tool
+`side_chat_parent_context` (parameters `{ recent?: number }`, 1–20, default 8): it returns
+the latest main-conversation user and assistant text messages whose `seq` is at or after the
+session's `inheritedEventCount`, each capped at 2000 characters, as a read-only digest for
+turns the side chat did not inherit. It never re-reads the inherited history, never exposes
+reasoning or tool output, and never mutates the parent. A create that reuses an existing
+`instanceKey` keeps the tool state of that session.
 
 `snapshot` and the live stream below are the client's message sources. `entries` are
 committed session events whose `seq >= max(inheritedEventCount, fromSeq ?? inheritedEventCount)`,
