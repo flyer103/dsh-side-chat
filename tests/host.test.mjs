@@ -577,6 +577,15 @@ test('list offers persisted side chats for restore', async () => {
   assert.deepEqual(other.body.restorable.map((item) => item.sessionId), ['side-chat-bbbb'])
 })
 
+test('list surfaces a live side session whose tab was lost', async () => {
+  const sessionQuery = { listSessions: async () => [] }
+  const runtime = makeRuntime({ services: { sessionQuery }, parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  const listed = await post(runtime, 'list', { sourceId: 'main-1' })
+  assert.equal(listed.body.restorable.some((item) => item.sessionId === created.body.sessionId), true)
+})
+
 test('resume reattaches a persisted side session and serves its snapshot', async () => {
   const runtime = makeRuntime({ parents: [makeParent()] })
   apply(runtime.ctx)
