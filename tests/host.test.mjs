@@ -12,6 +12,7 @@ import {
   completedTurnPrefix,
   imageAttachmentRef,
   isSystemNoise,
+  parentLookupTool,
   LiveAttemptState,
   projectQueue,
   recentMainContext,
@@ -2431,4 +2432,56 @@ test('the raw image routes frame correctly over a real HTTP server', async () =>
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
+})
+
+
+test('parentLookupTool only reads the main thread after the inherited seed and caps the request', async () => {
+  const parent = makeParent({ events: BASE_EVENTS })
+  const tool = parentLookupTool(parent, 4)
+  assert.equal(tool.name, 'side_chat_parent_context')
+  const after = await tool.execute({})
+  assert.doesNotMatch(after, /main task/, 'the inherited seed is not repeated')
+  assert.doesNotMatch(after, /working on it/, 'the inherited seed is not repeated')
+  assert.match(after, /\[user\] in flight request/)
+  assert.match(after, /\[assistant\] still working/)
+  assert.match(after, /latest 2 messages/)
+  const one = await tool.execute({ recent: 1 })
+  assert.match(one, /latest 1 messages/)
+  assert.doesNotMatch(one, /in flight request/)
+  assert.match(one, /still working/)
+  const unseeded = await parentLookupTool(parent).execute({})
+  assert.match(unseeded, /\[user\] main task/, 'without an inherited seed the whole thread is readable')
+  assert.match(unseeded, /latest 4 messages/)
+  assert.equal(await parentLookupTool(makeParent({ events: [] })).execute({}), 'The main conversation has no text messages to show yet.')
+})
+
+test('create registers the parent-lookup tool unless the request disables it', async () => {
+  const registered = []
+  const tools = { register(def) { registered.push(def); return () => {} } }
+  const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })], services: { tools } })
+  apply(runtime.ctx)
+  await post(runtime, 'create', { sourceId: 'main-1' })
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].name, 'side_chat_parent_context')
+  assert.deepEqual(registered[0].parameters, {
+    type: 'object',
+    properties: {
+      recent: {
+        type: 'number',
+        description: 'How many recent main-conversation messages to return (1-20, default 8).'
+      }
+    }
+  }, 'the registry expects the compiled JSON Schema, not the author-facing DSL map')
+  const after = await registered[0].execute({})
+  assert.doesNotMatch(after, /main task/, 'the create boundary is captured by the registered tool')
+  assert.match(after, /in flight request/)
+
+  const disabled = []
+  const off = makeRuntime({
+    parents: [makeParent({ events: BASE_EVENTS })],
+    services: { tools: { register(def) { disabled.push(def); return () => {} } } }
+  })
+  apply(off.ctx)
+  await post(off, 'create', { sourceId: 'main-1', lookup: false })
+  assert.deepEqual(disabled, [])
 })

@@ -181,6 +181,18 @@ answer, and nothing in the side chat can answer, dismiss or delay it. The card f
 latest request for that parent session and disappears when you dismiss it or answer in the
 main conversation (the next request replaces it).
 
+## Parent lookup
+
+Before a side chat sends its first message, its status bar carries a small **Parent lookup
+on/off** toggle (`可查主会话` / `不查主会话`). With lookup on — the default — the side
+agent gets a read-only tool, `side_chat_parent_context`, that returns the latest messages of
+the main conversation (up to 20, default 8) when the user refers to something that happened
+after the side chat was created. It is bounded by the side chat's inherited seed: only
+parent events at or after that boundary are readable, so it fills the later gap and never
+repeats history the side chat already inherited. The toggle applies until the side session
+is created: once the first message is sent the allowance is fixed, because the tool is
+registered with the agent. Off means the model has only the inherited snapshot and its own transcript.
+
 ## Inheritance semantics
 
 ### Completed-turn seed
