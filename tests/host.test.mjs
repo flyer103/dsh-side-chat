@@ -548,21 +548,33 @@ test('apply registers every contract route', () => {
 })
 
 test('list offers persisted side chats for restore', async () => {
+  function sideLog(parent, title) {
+    return [
+      { type: 'user/message', data: { source: { kind: 'plugin:side-chat' }, content: [{ type: 'text', text: `Boundary. You are in a side conversation derived from main session "${parent}".` }] } },
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: title }] } },
+    ]
+  }
+  const logs = {
+    'side-chat-aaaa': sideLog('main-1', 'Fix the login flow'),
+    'side-chat-bbbb': sideLog('main-2', 'Other chat'),
+  }
   const sessionQuery = {
     listSessions: async () => [
       { header: { id: 'side-chat-aaaa', createdAt: 20 } },
       { header: { id: 'side-chat-bbbb', createdAt: 10 } },
       { header: { id: 'session-main' } },
     ],
-    inspectSession: async (id) => id === 'side-chat-aaaa' ? 'Fix the login flow' : '',
+    inspectSession: async (id, read) => read({ snapshotEvents: () => logs[id] ?? [] }),
   }
   const runtime = makeRuntime({ services: { sessionQuery }, parents: [makeParent({ events: BASE_EVENTS })] })
   apply(runtime.ctx)
   const listed = await post(runtime, 'list', { sourceId: 'main-1' })
   assert.equal(listed.body.ok, true)
-  assert.deepEqual(listed.body.restorable.map((item) => item.sessionId), ['side-chat-aaaa', 'side-chat-bbbb'])
-  assert.deepEqual(listed.body.restorable.map((item) => item.createdAt), [20, 10])
-  assert.deepEqual(listed.body.restorable.map((item) => item.title), ['Fix the login flow', null])
+  assert.deepEqual(listed.body.restorable.map((item) => item.sessionId), ['side-chat-aaaa'])
+  assert.deepEqual(listed.body.restorable.map((item) => item.createdAt), [20])
+  assert.deepEqual(listed.body.restorable.map((item) => item.title), ['Fix the login flow'])
+  const other = await post(runtime, 'list', { sourceId: 'main-2' })
+  assert.deepEqual(other.body.restorable.map((item) => item.sessionId), ['side-chat-bbbb'])
 })
 
 test('resume reattaches a persisted side session and serves its snapshot', async () => {

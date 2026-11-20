@@ -1261,6 +1261,7 @@ test('restorable lists cold side chats and resume attaches the tab to one', asyn
   const { runtime } = createRuntimeWith(fetchStub)
   runtime.open('main-1')
   const items = await runtime.restorable('main-1')
+  assert.equal(fetchStub.calls.find((call) => call.url.endsWith('/api/list')).body.sourceId, 'main-1')
   assert.equal(items.length, 1)
   assert.equal(items[0].sessionId, 'side-chat-abc12345')
   assert.equal(await runtime.resume('main-1', 'side-chat-abc12345'), true)
