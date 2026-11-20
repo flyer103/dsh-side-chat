@@ -978,7 +978,7 @@ test('foldEntries groups one turn\'s reasoning and tools into a single process n
   assert.deepEqual(nodes.slice(1).map((node) => node.blocks[0].text), ['first step', 'second step'])
 })
 
-test('the turn process row says Working while the turn has no end yet', () => {
+test('a running turn hides its process row until the turn settles', () => {
   const { bodyRegistration } = panelRenderer()
   const state = panelState({
     sessionId: 'side-1',
@@ -993,9 +993,7 @@ test('the turn process row says Working while the turn has no end yet', () => {
   for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) tree = tree.type(tree.props)
   const processElement = findElement(tree, (element) => typeof element.type === 'function'
     && element.props !== undefined && element.props.node !== undefined && element.props.node.kind === 'process')
-  const rowTree = processElement.type(processElement.props)
-  const label = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process-label')
-  assert.equal(label.children[0], 'process.working')
+  assert.equal(processElement, undefined, 'no process row before turn/end')
 })
 
 test('formatTurnDuration uses seconds and minutes like the main transcript', () => {
