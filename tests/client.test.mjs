@@ -978,6 +978,26 @@ test('foldEntries groups one turn\'s reasoning and tools into a single process n
   assert.deepEqual(nodes.slice(1).map((node) => node.blocks[0].text), ['first step', 'second step'])
 })
 
+test('the turn process row says Working while the turn has no end yet', () => {
+  const { bodyRegistration } = panelRenderer()
+  const state = panelState({
+    sessionId: 'side-1',
+    nodes: [{ kind: 'process', seq: 2, turn: 1, start: 1000, end: undefined, blocks: [{ kind: 'reasoning', text: 'thinking' }] }]
+  })
+  let tree = bodyRegistration.component({
+    runtime: panelRuntime(state),
+    sessionId: 'main-1',
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) tree = tree.type(tree.props)
+  const processElement = findElement(tree, (element) => typeof element.type === 'function'
+    && element.props !== undefined && element.props.node !== undefined && element.props.node.kind === 'process')
+  const rowTree = processElement.type(processElement.props)
+  const label = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process-label')
+  assert.equal(label.children[0], 'process.working')
+})
+
 test('formatTurnDuration uses seconds and minutes like the main transcript', () => {
   const { exports } = loadBundle()
   assert.equal(exports.formatTurnDuration(400), '1s')
