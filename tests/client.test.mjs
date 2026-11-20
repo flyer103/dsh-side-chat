@@ -1253,6 +1253,18 @@ test('a not-found snapshot stops polling and records the polling failure', async
   assert.equal(scheduler.pending(), 0, 'not-found must stop the poll loop')
 })
 
+test('manual side-chat titles win over the generated label', () => {
+  const data = new Map()
+  const storage = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) }
+  const { runtime } = createRuntimeWith(createFetchStub({}), { config: { storage } })
+  runtime.open('main-1')
+  const id = 'side-chat-titled'
+  runtime.rename(id, '  My  topic  ')
+  assert.equal(runtime.customTitleOf(id), 'My topic')
+  runtime.rename(id, '')
+  assert.equal(runtime.customTitleOf(id), null)
+})
+
 test('draft and stop controls route through the runtime', async () => {
   const fetched = createFetchStub({
     create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },
