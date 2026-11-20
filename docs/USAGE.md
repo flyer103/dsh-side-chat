@@ -183,8 +183,9 @@ main conversation (the next request replaces it).
 ## Restore after restart
 
 Host-held side sessions are lost from memory when DSH restarts, but their session
-logs are not: open an empty side-chat tab and it lists the saved `side-chat-*`
-conversations above the empty state. Choosing one cold-resumes that agent from its
+logs are not: open an empty side-chat tab and it lists the saved side chats of
+**that main conversation** above the empty state (attributed through the side-chat
+boundary prompt, or the session header when present). Choosing one cold-resumes that agent from its
 session log (the side developer section and the parent-lookup tool are recomposed
 on resume), then the tab continues the same conversation; closing the tab deletes
 it as before. Tab layout itself is not restored by DSH, so reopen a side-chat tab
