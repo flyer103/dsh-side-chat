@@ -929,18 +929,92 @@ test('foldEntries renders assistant blocks and attaches tool results by callId',
     { seq: 7, type: 'plugin:unknown/event', time: 1700000000000, data: {} }
   ]
   const nodes = exports.foldEntries(entries, 3)
-  assert.equal(nodes.length, 2)
-  assert.equal(nodes[0].kind, 'user')
-  assert.equal(nodes[1].kind, 'assistant')
-  const blocks = nodes[1].blocks
-  assert.equal(blocks.length, 3)
-  assert.deepEqual(blocks.map((block) => block.kind), ['reasoning', 'text', 'tool-call'])
-  assert.equal(blocks[0].text, 'think first')
-  assert.equal(blocks[1].text, 'Running them.')
-  assert.equal(blocks[2].callId, 'call-1')
-  assert.equal(blocks[2].name, 'bash')
-  assert.equal(blocks[2].result.text, 'all tests passed')
-  assert.equal(blocks[2].result.isError, false)
+  assert.deepEqual(nodes.map((node) => node.kind), ['user', 'process', 'assistant'])
+  const process = nodes[1]
+  assert.equal(process.turn, 1)
+  assert.deepEqual(process.blocks.map((block) => block.kind), ['reasoning', 'tool-call'])
+  assert.equal(process.blocks[0].text, 'think first')
+  assert.equal(process.blocks[1].callId, 'call-1')
+  assert.equal(process.blocks[1].name, 'bash')
+  assert.equal(process.blocks[1].result.text, 'all tests passed')
+  assert.equal(process.blocks[1].result.isError, false)
+  assert.deepEqual(nodes[2].blocks.map((block) => block.kind), ['text'])
+  assert.equal(nodes[2].blocks[0].text, 'Running them.')
+})
+
+test('toolArgsSummary shows the command or path gist, not raw JSON', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.toolArgsSummary(JSON.stringify({ command: 'ls -la', description: 'list' })), 'ls -la')
+  assert.equal(exports.toolArgsSummary(JSON.stringify({ path: '/tmp/a.txt', content: 'x' })), '/tmp/a.txt')
+  assert.equal(exports.toolArgsSummary(JSON.stringify({ description: 'Read the file' })), 'Read the file')
+  assert.equal(exports.toolArgsSummary('not json'), 'not json')
+  assert.equal(exports.toolArgsSummary(''), '')
+  assert.equal(exports.toolArgsSummary(undefined), '')
+  assert.equal(exports.toolArgsSummary(JSON.stringify({ a: 'x'.repeat(400) })).endsWith('…'), true)
+})
+
+test('foldEntries groups one turn\'s reasoning and tools into a single process node', () => {
+  const { exports } = loadBundle()
+  const entries = [
+    { seq: 1, type: 'turn/start', time: 1000, data: { turn: 1 } },
+    assistantEntry(2, [
+      { type: 'reasoning', text: 'first thought' },
+      { type: 'text', text: 'first step' }
+    ]),
+    assistantEntry(3, [
+      { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{}' },
+      { type: 'text', text: 'second step' }
+    ]),
+    { seq: 4, type: 'turn/end', time: 5000, data: { turn: 1, reason: { kind: 'completed' } } }
+  ]
+  const nodes = exports.foldEntries(entries, 0)
+  assert.deepEqual(nodes.map((node) => node.kind), ['process', 'assistant', 'assistant'])
+  const process = nodes[0]
+  assert.equal(process.turn, 1)
+  assert.equal(process.start, 1000)
+  assert.equal(process.end, 5000)
+  assert.equal(process.reason, 'completed')
+  assert.deepEqual(process.blocks.map((block) => block.kind), ['reasoning', 'tool-call'])
+  assert.deepEqual(nodes.slice(1).map((node) => node.blocks[0].text), ['first step', 'second step'])
+})
+
+test('formatTurnDuration uses seconds and minutes like the main transcript', () => {
+  const { exports } = loadBundle()
+  assert.equal(exports.formatTurnDuration(400), '1s')
+  assert.equal(exports.formatTurnDuration(42000), '42s')
+  assert.equal(exports.formatTurnDuration(273000), '4m 33s')
+  assert.equal(exports.formatTurnDuration(3600000), '60m 0s')
+})
+
+test('the panel renders the collapsed turn process row with its duration', () => {
+  const { bodyRegistration } = panelRenderer()
+  const state = panelState({
+    sessionId: 'side-1',
+    nodes: [{
+      kind: 'process', seq: 2, turn: 1, start: 1000, end: 5000, reason: 'completed',
+      blocks: [{ kind: 'reasoning', text: 'thought' }, { kind: 'tool-call', callId: 'c1', name: 'bash', argsRaw: '{}', result: null }]
+    }]
+  })
+  const bodyElement = bodyRegistration.component({
+    runtime: panelRuntime(state),
+    sessionId: 'main-1',
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { visible: true } })
+  })
+  let tree = bodyElement
+  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) {
+    tree = tree.type(tree.props)
+  }
+  const processElement = findElement(tree, (element) => typeof element.type === 'function'
+    && element.props !== undefined && element.props.node !== undefined && element.props.node.kind === 'process')
+  assert.ok(processElement !== undefined, 'the panel renders a process row element')
+  const rowTree = processElement.type(processElement.props)
+  const label = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process-label')
+  assert.ok(label !== undefined, 'the process row renders')
+  assert.equal(label.children[0], 'process.took4s')
+  const button = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process')
+  assert.equal(button.props.disabled, false, 'a row with reasoning/tools is foldable')
+  assert.equal(button.props['aria-expanded'], false, 'it starts collapsed like the main transcript')
 })
 
 test('foldEntries classifies injected context into localizable tags and ignores replacement surfaces', () => {
@@ -1765,8 +1839,9 @@ test('a live SSE stream renders the assistant attempt and reconciles with the co
   state = runtime.getState('main-1')
   assert.equal(state.live, null, 'the committed settlement clears the live attempt')
   assert.equal(state.nextSeq, 5)
-  assert.deepEqual(state.nodes.map((node) => node.kind), ['user', 'assistant'])
-  assert.equal(state.nodes[1].blocks[0].text, 'Hello world')
+  assert.deepEqual(state.nodes.map((node) => node.kind), ['user', 'process', 'assistant'])
+  assert.deepEqual(state.nodes[1].blocks, [], 'a text-only turn folds an empty process row')
+  assert.equal(state.nodes[2].blocks[0].text, 'Hello world')
   assert.equal(exports.liveAttemptOf(state), null)
   assert.deepEqual(exports.liveBlocksOf(state), [])
   assert.equal(state.streaming, true, 'the stream stays open after the settlement')

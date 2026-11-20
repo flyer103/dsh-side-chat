@@ -246,10 +246,18 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   opening a tab does no host work.
 - Fold `entries` into rows with pure functions: `user/message` (`data.source` / `data.content`,
   including `{ type: 'image', attachment }` blocks → the row's `images` list),
+  `turn/start` / `turn/end` (turn number, elapsed window, end reason),
   `assistant/message` (`data.message.content` blocks: `text`, `reasoning`, `tool-call`),
   `tool/call`, `tool/result` (`data.message.source.callId`, `content`, `isError`), plus small
   tags for `context` / `steering`. Unknown event types are ignored, never thrown on. A
   user message with no text still renders when it carries at least one image.
+- A settled turn folds its **process blocks** (`reasoning`, `tool-call`) into one
+  `process` node placed before that turn's assistant text; `assistant` nodes keep only
+  `text` blocks. The process row is the main transcript's shape: a chevron button with
+  `Completed`, `Completed in <elapsed>`, `Failed` or `Stopped` (locale keys `process.*`),
+  disabled when the turn has no process blocks, collapsed by default, and expanding it
+  lists the turn's reasoning folds and tool blocks. Turns without a recorded `turn/start`
+  (a snapshot that opens mid-turn) show no elapsed time.
 - Hide rows below the fork floor (`seq < inheritedEventCount`) and the injected boundary
   message (`source.kind === 'plugin:side-chat'`, or text starting with
   `Side conversation boundary.`).
