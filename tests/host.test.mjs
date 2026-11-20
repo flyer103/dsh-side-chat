@@ -69,7 +69,7 @@ const DEFAULT_SERVICES = {
   },
 }
 
-function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, resumeFailure, followupFailure, disposeFailure } = {}) {
+function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, resumeFailure, resumePreset, followupFailure, disposeFailure } = {}) {
   const routes = new Map()
   const effects = []
   const listeners = new Map()
@@ -178,7 +178,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
         const sessionId = options.resumeSessionId
         const session = {
           id: sessionId,
-          header: { id: sessionId },
+          header: { id: sessionId, ...(resumePreset === undefined ? {} : { agentPreset: resumePreset }) },
           inheritedEventCount: 0,
           events: [],
           appends: [],
@@ -584,6 +584,17 @@ test('list surfaces a live side session whose tab was lost', async () => {
   const created = await post(runtime, 'create', { sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
   const listed = await post(runtime, 'list', { sourceId: 'main-1' })
   assert.equal(listed.body.restorable.some((item) => item.sessionId === created.body.sessionId), true)
+})
+
+test('resume recomposes the stored agent preset', async () => {
+  const mounted = []
+  const services = { agentPresets: { mount: async (childCtx, id) => { mounted.push([childCtx, id]) }, composeFrom: () => 'standard' } }
+  const runtime = makeRuntime({ parents: [makeParent()], services, resumePreset: 'cordis' })
+  apply(runtime.ctx)
+  const resumed = await post(runtime, 'resume', { sessionId: 'side-chat-preset', sourceId: 'main-1', instanceKey: 'main-1#tab' })
+  assert.equal(resumed.body.ok, true)
+  assert.equal(mounted.length, 1)
+  assert.equal(mounted[0][1], 'cordis')
 })
 
 test('restore titles ignore the inherited parent seed', async () => {

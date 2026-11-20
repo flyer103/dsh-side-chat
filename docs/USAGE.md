@@ -188,7 +188,7 @@ logs are not: open an empty side-chat tab and it lists the saved side chats of
 boundary prompt, or the session header when present). A page reload that drops the
 tabs does not hide them: their live sessions stay in the same list until the Host
 restarts, then they become ordinary cold restores. Choosing one cold-resumes that agent from its
-session log (the side developer section and the parent-lookup tool are recomposed
+session log (the stored agent preset and the side developer section are recomposed
 on resume), then the tab continues the same conversation; closing the tab deletes
 it as before. Tab layout itself is not restored by DSH, so reopen a side-chat tab
 first. Restoring a side session of a different main session binds its parent lookup
