@@ -586,6 +586,24 @@ test('list surfaces a live side session whose tab was lost', async () => {
   assert.equal(listed.body.restorable.some((item) => item.sessionId === created.body.sessionId), true)
 })
 
+test('restore titles ignore the inherited parent seed', async () => {
+  const sessionQuery = {
+    listSessions: async () => [{ header: { id: 'side-chat-seeded', createdAt: 5 } }],
+    inspectSession: async (id, read) => read({
+      inheritedEventCount: 1,
+      snapshotEvents: () => [
+        { seq: 0, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'parent first message' }] } },
+        { seq: 1, type: 'user/message', data: { source: { kind: 'plugin:side-chat' }, content: [{ type: 'text', text: 'derived from main session "main-1"' }] } },
+        { seq: 2, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'side chat own question' }] } }
+      ]
+    })
+  }
+  const runtime = makeRuntime({ services: { sessionQuery }, parents: [makeParent()] })
+  apply(runtime.ctx)
+  const listed = await post(runtime, 'list', { sourceId: 'main-1' })
+  assert.equal(listed.body.restorable[0].title, 'side chat own question')
+})
+
 test('resume reattaches a persisted side session and serves its snapshot', async () => {
   const runtime = makeRuntime({ parents: [makeParent()] })
   apply(runtime.ctx)
