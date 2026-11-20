@@ -1253,6 +1253,27 @@ test('a not-found snapshot stops polling and records the polling failure', async
   assert.equal(scheduler.pending(), 0, 'not-found must stop the poll loop')
 })
 
+test('a restored tab reattaches the side session it owned before the restart', async () => {
+  const data = new Map()
+  const storage = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) }
+  const fetchStub = createFetchStub({ resume: { ok: true, sessionId: 'side-chat-owned', inheritedEventCount: 3 } })
+  const { runtime } = createRuntimeWith(fetchStub, { config: { storage } })
+  runtime.open('main-1#tab-a')
+  await runtime.resume('main-1#tab-a', 'side-chat-owned')
+  const second = createRuntimeWith(fetchStub, { config: { storage } }).runtime
+  second.open('main-1#tab-a')
+  assert.equal(await second.autoResume('main-1#tab-a'), true)
+  assert.equal(second.getState('main-1#tab-a').sessionId, 'side-chat-owned')
+})
+
+test('autoResume stays silent when no mapping exists', async () => {
+  const storage = { getItem: () => null, setItem: () => {} }
+  const { runtime } = createRuntimeWith(createFetchStub({}), { config: { storage } })
+  runtime.open('main-1#tab-a')
+  assert.equal(await runtime.autoResume('main-1#tab-a'), false)
+  assert.equal(runtime.getState('main-1#tab-a').sessionId, null)
+})
+
 test('restorable lists cold side chats and resume attaches the tab to one', async () => {
   const fetchStub = createFetchStub({
     list: { ok: true, restorable: [{ sessionId: 'side-chat-abc12345', createdAt: 1700000000000 }] },
