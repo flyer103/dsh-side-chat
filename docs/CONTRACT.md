@@ -203,7 +203,8 @@ auth headers on either; same-origin only, like every other route.
 
 The side chat is a native tab type of the right Sidebar, opened from that column's guide
 page — the same public path every shipped tab uses (`ctx.sidebarRightTabs.register` +
-`ctx.slots.register`). There is no session-header button and no floating overlay. The tab
+`ctx.slots.register`). There is no session-header button and no separate floating panel for
+the side chat itself; the only floating surface is the one text selection admits (below). The tab
 type is registered with `multiple: true`, so one parent session can hold several side-chat
 tab instances in the same pane; each instance owns its own side session. The guide entry
 and the tab's status-bar new-side-chat button each open a fresh instance.
@@ -214,6 +215,8 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
 | `ctx.slots.register` | `{ name: 'sidebar.right.pane.tab', key: pkg }` | tab body (message flow + composer) |
 | `ctx.slots.register` | `{ name: 'sidebar.right.pane.tab.title', key: pkg }` | tab chip title (plain, or numbered for later instances) |
 | `ctx.sidebarRight.registerCloseHandler` | `('side-chat', (sessionId, tab) => close)` | closing the tab destroys only that tab's side session |
+| `ctx.uiConversation.interactions.register` | `{ id: pkg + '/selection', onInteraction }` | admit a main-conversation text selection and show its action surface |
+| `ctx.slots.register` | `{ name: 'conversation.chat.text-interaction', key: pkg + '/selection' }` | the **Ask in side chat** button rendered through that seat |
 
 - One side session per tab instance, not per parent session. The client derives an opaque
   per-tab identity `${sourceId}#${tabId}` from the parent session id and the tab instance
@@ -240,6 +243,26 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   action that writes the flattened text into that tab's composer draft, and a dismiss
   action that clears the local copy. No host route and no session event is created by
   observing; `remote` and `sessions` are part of the client `inject` list.
+- **Ask from a selection.** The client registers one Chat text-interaction consumer
+  (`id: pkg + '/selection'`). Text-interaction dispatch hands a gesture to consumers in
+  registration order and stops at the first one that opens its surface, so the shipped Quote
+  consumer (registered earlier) owns a plain `selection`; this consumer therefore also
+  admits `contextmenu` on the same selection and suppresses the native menu while it opens.
+  On a build without such an earlier consumer, plain selection reaches this consumer too.
+  A **companion segment** joins that surface so both actions read as one pill: the client
+  registers a `shell.overlay` entry that appends its segment inside the chat's own
+  `[data-text-interaction-surface]` element and adds `sc-ask-surface` to it, which restyles
+  the pair as one floating pill (shared background, radius, shadow and a divider). It
+  removes both when the surface closes, the selection empties, or the visible surface is
+  this plugin's fallback consumer (which already carries its own button). The press turns
+  the selection into a Markdown quote (`> …`) ending in one newline, queues it in the client
+  runtime, asks the composer to focus at the draft caret, and calls
+  `ctx.sidebarRight.openTab('side-chat')`, which mints a fresh tab; the next tab body that
+  mounts consumes the queued text as its composer draft. No host route and no session is
+  created by selecting or by the press — the draft session still starts at send. The
+  selection travels as text only; the plugin reads no DOM offsets and no session log. The
+  client half therefore declares `uiConversation` in its `inject` list alongside
+  `sidebarRight`/`sidebarRightTabs`/`slots`/`locale`.
 
 ## Rendering contract (client)
 
