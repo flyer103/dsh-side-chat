@@ -943,6 +943,19 @@ test('foldEntries renders assistant blocks and attaches tool results by callId',
   assert.equal(blocks[2].result.isError, false)
 })
 
+test('foldEntries hides the side-chat boundary and generic injected messages', () => {
+  const { exports } = loadBundle()
+  const entries = [
+    userEntry(3, 'real question'),
+    userEntry(4, 'boundary prompt', { kind: 'plugin:side-chat' }),
+    userEntry(5, 'some injected note', { kind: 'something-else' }),
+    userEntry(6, 'skill loaded', { kind: 'skill-invocation', name: 'x' })
+  ]
+  const nodes = exports.foldEntries(entries, 0)
+  assert.deepEqual(nodes.map((node) => node.kind), ['user', 'context'])
+  assert.equal(nodes[1].tag, 'skill')
+})
+
 test('foldEntries classifies injected context into localizable tags and ignores replacement surfaces', () => {
   const { exports } = loadBundle()
   const entries = [

@@ -252,7 +252,9 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   user message with no text still renders when it carries at least one image.
 - Hide rows below the fork floor (`seq < inheritedEventCount`) and the injected boundary
   message (`source.kind === 'plugin:side-chat'`, or text starting with
-  `Side conversation boundary.`).
+  `Side conversation boundary.`). Injected user messages with no specific tag also stay out
+  of the transcript instead of rendering as a bare `Context` chip; tagged injections
+  (skill, session reference, steering, agent instructions, compaction) still render.
 - The in-flight attempt (`live.activeAttempt`) renders after the committed rows as a normal
   assistant row: reasoning and tool folds, tool arguments, and Markdown rendered with the
   shell renderer's `streaming` flag. It is hidden when there is no active attempt or when
