@@ -27,6 +27,8 @@ raw bytes instead of JSON.
 | `/side-chat/api/prompt` | `{ sessionId, text, attachments? }` | `{ ok: true }` \| `{ ok: false, code, message, reason? }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
+| `/side-chat/api/list` | `{ sourceId? }` | `{ ok: true, sessions, restorable }` — `restorable` lists persisted `side-chat-*` logs not currently owned, newest first |
+| `/side-chat/api/resume` | `{ sessionId, sourceId, instanceKey }` | `{ ok: true, sessionId, inheritedEventCount }` — cold-resumes one `side-chat-*` log and registers it exactly like a created session |
 | `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement, images? }], lastError }` \| `{ ok: false, code }` |
 | `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
 | `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |

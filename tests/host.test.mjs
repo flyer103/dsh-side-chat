@@ -69,7 +69,7 @@ const DEFAULT_SERVICES = {
   },
 }
 
-function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, followupFailure, disposeFailure } = {}) {
+function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFailure, resumeFailure, followupFailure, disposeFailure } = {}) {
   const routes = new Map()
   const effects = []
   const listeners = new Map()
@@ -77,6 +77,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
   const created = []
   const handles = []
   const disposed = []
+  const resumed = []
   const locateCalls = []
   const timeouts = []
   const order = []
@@ -171,6 +172,42 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
         if (createDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, createDelayMs))
         return defaultCreate(options)
       },
+      resume: async (options) => {
+        resumed.push(options)
+        if (resumeFailure !== undefined) throw resumeFailure
+        const sessionId = options.resumeSessionId
+        const session = {
+          id: sessionId,
+          header: { id: sessionId },
+          inheritedEventCount: 0,
+          events: [],
+          appends: [],
+          append() {},
+          snapshotEvents() { return [] },
+        }
+        const childCtx = {
+          get: (serviceName) => resolvedServices[serviceName],
+          systemPrompt: { section() { return () => {} } },
+          effect() { return () => {} },
+        }
+        const agent = {
+          id: sessionId,
+          status: 'idle',
+          options: {},
+          session,
+          ctx: childCtx,
+          inbox: { nextStep: [], nextTurn: [] },
+          followups: [],
+          cancels: [],
+          followup(message) { this.followups.push(message) },
+          steer() {},
+          cancel(cause) { this.cancels.push(cause) },
+        }
+        await options.setup?.(childCtx, agent)
+        const handle = { agent, childCtx, async dispose() { disposed.push(sessionId) } }
+        handles.push(handle)
+        return handle
+      },
     },
     get: (serviceName) => resolvedServices[serviceName],
     on(eventName, callback) {
@@ -204,6 +241,7 @@ function makeRuntime({ parents = [], services = {}, createDelayMs = 0, createFai
     order,
     resolvedServices,
     parentMap,
+    resumed,
   }
   return runtime
 }
@@ -503,9 +541,40 @@ test('apply registers every contract route', () => {
     `${ROUTE_PREFIX}list`,
     `${ROUTE_PREFIX}prompt`,
     `${ROUTE_PREFIX}references`,
+    `${ROUTE_PREFIX}resume`,
     `${ROUTE_PREFIX}snapshot`,
     `${ROUTE_PREFIX}status`,
   ])
+})
+
+test('list offers persisted side chats for restore', async () => {
+  const sessionQuery = {
+    listSessions: async () => [
+      { header: { id: 'side-chat-aaaa', createdAt: 20 } },
+      { header: { id: 'side-chat-bbbb', createdAt: 10 } },
+      { header: { id: 'session-main' } },
+    ],
+  }
+  const runtime = makeRuntime({ services: { sessionQuery }, parents: [makeParent({ events: BASE_EVENTS })] })
+  apply(runtime.ctx)
+  const listed = await post(runtime, 'list', { sourceId: 'main-1' })
+  assert.equal(listed.body.ok, true)
+  assert.deepEqual(listed.body.restorable.map((item) => item.sessionId), ['side-chat-aaaa', 'side-chat-bbbb'])
+  assert.deepEqual(listed.body.restorable.map((item) => item.createdAt), [20, 10])
+})
+
+test('resume reattaches a persisted side session and serves its snapshot', async () => {
+  const runtime = makeRuntime({ parents: [makeParent()] })
+  apply(runtime.ctx)
+  const resumed = await post(runtime, 'resume', { sessionId: 'side-chat-aaaa', sourceId: 'main-1', instanceKey: 'main-1#tab-a' })
+  assert.equal(resumed.body.ok, true)
+  assert.equal(runtime.resumed.length, 1)
+  assert.equal(runtime.resumed[0].resumeSessionId, 'side-chat-aaaa')
+  const snapshot = await post(runtime, 'snapshot', { sessionId: 'side-chat-aaaa' })
+  assert.equal(snapshot.body.ok, true)
+  assert.equal(snapshot.body.inheritedEventCount, 0)
+  const listed = await post(runtime, 'list', { sourceId: 'main-1' })
+  assert.equal(listed.body.sessions.some((item) => item.sessionId === 'side-chat-aaaa'), true)
 })
 
 test('create seeds the completed-turn prefix and is idempotent per source', async () => {
@@ -753,9 +822,9 @@ test('snapshot reports running state and the last error without waking the agent
 test('list reports live side sessions', async () => {
   const runtime = makeRuntime({ parents: [makeParent({ events: BASE_EVENTS })] })
   apply(runtime.ctx)
-  assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [] })
+  assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [], restorable: [] })
   const sessionId = (await post(runtime, 'create', { sourceId: 'main-1' })).body.sessionId
-  assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [{ sessionId, sourceId: 'main-1' }] })
+  assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [{ sessionId, sourceId: 'main-1' }], restorable: [] })
 })
 
 test('distinct instance keys create one side session per tab instance', async () => {
@@ -815,6 +884,7 @@ test('closing one instance leaves the other alive and allows the key a new sessi
   assert.deepEqual((await post(runtime, 'list', {})).body, {
     ok: true,
     sessions: [{ sessionId: second.body.sessionId, sourceId: 'main-1' }],
+    restorable: [],
   })
   assert.equal(runtime.disposed.includes(first.body.sessionId), true)
   assert.equal(runtime.disposed.includes(second.body.sessionId), false)
@@ -843,6 +913,7 @@ test('list reports both instances of a parent with their source id', async () =>
       { sessionId: first.body.sessionId, sourceId: 'main-1' },
       { sessionId: second.body.sessionId, sourceId: 'main-1' },
     ],
+    restorable: [],
   })
 })
 
@@ -884,7 +955,7 @@ test('close removes the handle first, disposes, then deletes the persisted artif
     assert.equal(await access(dir).then(() => true, () => false), false, 'artifact directory removed')
 
     assert.deepEqual((await post(runtime, 'close', { sessionId })).body, { ok: false, code: 'not-found' })
-    assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [] })
+    assert.deepEqual((await post(runtime, 'list', {})).body, { ok: true, sessions: [], restorable: [] })
 
     const recreated = await post(runtime, 'create', { sourceId: 'main-1' })
     assert.equal(recreated.body.ok, true)
@@ -956,7 +1027,7 @@ test('close still succeeds when the artifact cannot be deleted, and reports disp
     assert.equal(failed.body.ok, false)
     assert.equal(failed.body.code, 'dispose-failed')
     assert.equal(failed.body.message, 'dispose exploded')
-    assert.deepEqual((await post(disposeFailure, 'list', {})).body, { ok: true, sessions: [] })
+    assert.deepEqual((await post(disposeFailure, 'list', {})).body, { ok: true, sessions: [], restorable: [] })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

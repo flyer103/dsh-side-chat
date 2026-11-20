@@ -1253,6 +1253,35 @@ test('a not-found snapshot stops polling and records the polling failure', async
   assert.equal(scheduler.pending(), 0, 'not-found must stop the poll loop')
 })
 
+test('restorable lists cold side chats and resume attaches the tab to one', async () => {
+  const fetchStub = createFetchStub({
+    list: { ok: true, restorable: [{ sessionId: 'side-chat-abc12345', createdAt: 1700000000000 }] },
+    resume: { ok: true, sessionId: 'side-chat-abc12345', inheritedEventCount: 42 }
+  })
+  const { runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  const items = await runtime.restorable('main-1')
+  assert.equal(items.length, 1)
+  assert.equal(items[0].sessionId, 'side-chat-abc12345')
+  assert.equal(await runtime.resume('main-1', 'side-chat-abc12345'), true)
+  assert.equal(runtime.getState('main-1').sessionId, 'side-chat-abc12345')
+  assert.equal(runtime.getState('main-1').inheritedEventCount, 42)
+  assert.equal(runtime.getState('main-1').nextSeq, 42)
+  assert.equal(fetchStub.calls.some((call) => call.url.endsWith('/api/resume')), true)
+})
+
+test('resume refuses non-side ids and tabs that already own a session', async () => {
+  const fetchStub = createFetchStub({ create: { ok: true, sessionId: 'side-chat-created' } })
+  const { runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  assert.equal(await runtime.resume('main-1', 'session-ordinary'), false)
+  runtime.setDraft('main-1', 'hello')
+  await runtime.send('main-1', 'hello')
+  const before = runtime.getState('main-1').sessionId
+  assert.notEqual(before, null)
+  assert.equal(await runtime.resume('main-1', 'side-chat-abc12345'), false)
+})
+
 test('draft and stop controls route through the runtime', async () => {
   const fetched = createFetchStub({
     create: { ok: true, sessionId: 'side-1', inheritedEventCount: 0 },

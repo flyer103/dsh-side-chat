@@ -180,6 +180,16 @@ answering. The card is observe-only: the main conversation still owns the dialog
 answer, and nothing in the side chat can answer, dismiss or delay it. The card follows the
 latest request for that parent session and disappears when you dismiss it or answer in the
 main conversation (the next request replaces it).
+## Restore after restart
+
+Host-held side sessions are lost from memory when DSH restarts, but their session
+logs are not: open an empty side-chat tab and it lists the saved `side-chat-*`
+conversations above the empty state. Choosing one cold-resumes that agent from its
+session log (the side developer section and the parent-lookup tool are recomposed
+on resume), then the tab continues the same conversation; closing the tab deletes
+it as before. Tab layout itself is not restored by DSH, so reopen a side-chat tab
+first. Restoring a side session of a different main session binds its parent lookup
+to the current main session.
 
 ## Inheritance semantics
 
