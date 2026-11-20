@@ -554,6 +554,7 @@ test('list offers persisted side chats for restore', async () => {
       { header: { id: 'side-chat-bbbb', createdAt: 10 } },
       { header: { id: 'session-main' } },
     ],
+    inspectSession: async (id) => id === 'side-chat-aaaa' ? 'Fix the login flow' : '',
   }
   const runtime = makeRuntime({ services: { sessionQuery }, parents: [makeParent({ events: BASE_EVENTS })] })
   apply(runtime.ctx)
@@ -561,6 +562,7 @@ test('list offers persisted side chats for restore', async () => {
   assert.equal(listed.body.ok, true)
   assert.deepEqual(listed.body.restorable.map((item) => item.sessionId), ['side-chat-aaaa', 'side-chat-bbbb'])
   assert.deepEqual(listed.body.restorable.map((item) => item.createdAt), [20, 10])
+  assert.deepEqual(listed.body.restorable.map((item) => item.title), ['Fix the login flow', null])
 })
 
 test('resume reattaches a persisted side session and serves its snapshot', async () => {
