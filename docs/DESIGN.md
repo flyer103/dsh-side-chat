@@ -453,7 +453,7 @@ tests, with no GUI run recorded:
 - **Model route changes mid-tab**: the vision check runs per send on the agent's current
   route, not on the route captured at creation.
 
-## P1b-2 — restore after a Host restart (on main; not yet released)
+## P1b-2 — restore after a Host restart (shipped in 0.12.0)
 
 Side-session logs persist. An empty side-chat tab lists the saved sessions of that main
 conversation and cold-resumes one through `agents.resume`, recomposing the stored agent
