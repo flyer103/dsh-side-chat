@@ -180,19 +180,21 @@ answering. The card is observe-only: the main conversation still owns the dialog
 answer, and nothing in the side chat can answer, dismiss or delay it. The card follows the
 latest request for that parent session and disappears when you dismiss it or answer in the
 main conversation (the next request replaces it).
+
 ## Restore after restart
 
-Host-held side sessions are lost from memory when DSH restarts, but their session
-logs are not: open an empty side-chat tab and it lists the saved side chats of
-**that main conversation** above the empty state (attributed through the side-chat
-boundary prompt, or the session header when present). A page reload that drops the
-tabs does not hide them: their live sessions stay in the same list until the Host
-restarts, then they become ordinary cold restores. Choosing one cold-resumes that agent from its
-session log (the stored agent preset and the side developer section are recomposed
-on resume), then the tab continues the same conversation; closing the tab deletes
-it as before. Tab layout itself is not restored by DSH, so reopen a side-chat tab
-first. Restoring a side session of a different main session binds its parent lookup
-to the current main session.
+Host-held side sessions are lost from memory when DSH restarts, but their session logs are
+not: reopen a side-chat tab and it reattaches to the side session it had before the reload
+through this browser's tab mapping; when that mapping is gone, the empty tab lists the saved
+side chats of **that main conversation** above the empty state (attributed through the
+side-chat boundary prompt, or the session header when present), and one pick cold-resumes
+the session. A page reload that drops the tabs does not hide the live sessions: they stay in
+the same list until the Host restarts, then they become ordinary cold restores. Choosing one
+cold-resumes that agent from its session log (the stored agent preset and the side developer
+section are recomposed on resume), then the tab continues the same conversation; closing the
+tab still deletes it. DSH restores the dock tab itself, but this plugin's in-memory panel is
+not part of that layout, which is why a restored tab reattaches (or shows the list) when it
+mounts.
 
 ## Inheritance semantics
 
@@ -256,11 +258,11 @@ permission rows. It also inherits:
   status/draft state. Closing a tab ends only that side session — it cannot be reopened —
   and the other side chats and the parent session are unaffected.
 - The side session owns its own persisted log on disk. The main session's log is untouched.
-- Host handles live in memory. A GUI or host restart loses every side session. A page reload
-  drops the client tab state; if the rebuilt tab reuses the same per-tab identity while the
-  host process is still running, `create` is idempotent per identity and reattaches to the
-  existing side session, otherwise the next message starts a new one (see Known
-  limitations).
+- Host handles live in memory. A GUI or host restart loses every live handle; the persisted
+  logs survive, so a reopened or restored tab can cold-resume them (see Restore after
+  restart). A page reload drops the client tab state; the tab mapping reattaches the previous
+  side session, and a rebuilt tab that reuses its per-tab identity while the host is still
+  running also reattaches through `create` (idempotent per identity).
 - The tab does not attach to the session through the generic client `sessions` service: a
   parentless subagent-origin session is not addressable there. Its message sources are the
   host's live `/side-chat/api/events` stream and the read-only
@@ -657,11 +659,14 @@ updates.
 
 **A refresh lost the side chat.**
 
-Tab state lives in memory and is not restored across a reload. If the rebuilt tab reuses the
-same per-tab identity while the host process is still running, its `create` reattaches to
-the existing side session (create is idempotent per instance key); otherwise you get a new
-side chat. After a GUI or host restart every side session is gone. Reopen the guide card or
-press the new-side-chat button; a new side chat is created on the next message.
+Tab state lives in memory, but the session log and a per-browser tab mapping survive. A tab
+that comes back with the same identity reattaches to its previous side session through that
+mapping; if the mapping is missing, an empty tab lists the saved side chats of this main
+conversation. While the Host is still running, a rebuilt tab with the same identity also
+reattaches through `create` (idempotent per instance key); after a Host restart, pick the
+saved conversation from the list or open a side-chat tab again. Closing a tab still destroys
+its side session, so a closed chat is not restorable; the list shows only chats whose logs
+still exist.
 
 **Clicking the guide card starts another side chat instead of focusing the old one.**
 
@@ -704,8 +709,10 @@ is about a dependency, not this plugin.
 ## Known limitations
 
 - **Approval prompts are not surfaced in the side-chat tab.** See above.
-- **A closed tab cannot be restored.** Closing destroys only that side session; a GUI or host
-  restart also loses every side session. The other side chats are unaffected.
+- **A closed tab cannot be restored.** Closing destroys only that side session. A side chat
+  that was open when the GUI or host restarted is a different case: its log survives, and the
+  tab can reattach or an empty tab can cold-resume it (see Restore after restart). The other
+  side chats are unaffected.
 - **Every side chat carries its own inherited context.** Its first request is about as large
   as the parent's next request, so N concurrent side chats multiply that cost.
 - **Artifact deletion is best effort.** The agent is always disposed, but the side session's
@@ -738,10 +745,11 @@ is about a dependency, not this plugin.
   thumbnail, a failed send, or closing a tab after uploading leaves unreferenced objects under
   the DSH home. They are never referenced by a session and appear in no list.
 - **The image rail is per tab and in-memory.** Closing the tab discards it; a host restart
-  loses the rail (and every side session), and a stale reference is refused with the
-  "image is no longer available" reason instead of being sent.
+  loses the rail (the side chat itself can be restored from its log, without the rail), and a
+  stale reference is refused with the "image is no longer available" reason instead of being
+  sent.
 - **P1b items are designed but not implemented:** model picker for the side session,
-  side-session history across a GUI restart, approval rendering in the tab.
+  approval rendering in the tab.
 - **The usage dock is approximate and side-scoped.** Token and cache-hit totals cover the
   side chat's own requests — including the inherited context its first request re-sends — and
   never the parent's earlier requests; context occupancy is the newest provider-reported

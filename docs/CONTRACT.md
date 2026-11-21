@@ -27,11 +27,10 @@ raw bytes instead of JSON.
 | `/side-chat/api/prompt` | `{ sessionId, text, attachments? }` | `{ ok: true }` \| `{ ok: false, code, message, reason? }` |
 | `/side-chat/api/cancel` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code }` |
 | `/side-chat/api/close` | `{ sessionId }` | `{ ok: true }` \| `{ ok: false, code, message }` |
-| `/side-chat/api/list` | `{ sourceId? }` | `{ ok: true, sessions, restorable }` — `restorable` lists this parent's `side-chat-*` logs (boundary-prompt parent, else `parentSession` header), newest first, including live sessions whose tabs were lost in a page reload |
+| `/side-chat/api/list` | `{ sourceId? }` | `{ ok: true, sessions: [{ sessionId, sourceId }], restorable }` — `restorable` lists this parent's `side-chat-*` logs (boundary-prompt parent, else `parentSession` header), newest first, including live sessions whose tabs were lost in a page reload |
 | `/side-chat/api/resume` | `{ sessionId, sourceId, instanceKey }` | `{ ok: true, sessionId, inheritedEventCount }` — cold-resumes one `side-chat-*` log, recomposes its stored preset and registers it exactly like a created session |
 | `/side-chat/api/status` | `{ sessionId }` | `{ ok: true, status, running, queue: [{ id, text, placement, images? }], lastError }` \| `{ ok: false, code }` |
 | `/side-chat/api/snapshot` | `{ sessionId, fromSeq? }` | `{ ok: true, inheritedEventCount, contextWindow?, running, status, lastError, entries, truncated, live }` \| `{ ok: false, code }` |
-| `/side-chat/api/list` | `{}` | `{ ok: true, sessions: [{ sessionId, sourceId }] }` |
 | `/side-chat/api/references` | `{ sourceId?, sessionId?, query, quoted? }` | `{ ok: true, candidates: [{ path, kind: 'file' \| 'directory' } \| { kind: 'session', sessionId, label, mention, location?: string \| null, createdAt }] }` \| `{ ok: false, code, message? }` |
 
 `snapshot` and the live stream below are the client's message sources. `entries` are
