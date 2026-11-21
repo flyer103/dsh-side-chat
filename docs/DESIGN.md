@@ -453,13 +453,36 @@ tests, with no GUI run recorded:
 - **Model route changes mid-tab**: the vision check runs per send on the agent's current
   route, not on the route captured at creation.
 
+## P1b-2 — restore after a Host restart (on main; not yet released)
+
+Side-session logs persist. An empty side-chat tab lists the saved sessions of that main
+conversation and cold-resumes one through `agents.resume`, recomposing the stored agent
+preset and the side developer section. A tab that was open before a page reload reattaches
+through a per-browser localStorage mapping keyed by the tab identity; a stale mapping falls
+back to the list. Closing the tab still deletes the session artifact, so a closed side chat
+is not restorable.
+
+### Adversarial notes (P1b-2)
+
+- **Host restart while a tab is open**: the in-memory agent is gone; the tab's mapping
+  cold-resumes its log, and an empty tab lists it when the mapping is stale. The resumed
+  session is registered under the same session id, so a repeated create/resume reattaches
+  to one entry instead of creating a second agent.
+- **Close after restore**: the resumed handle uses the same close path, so the artifact is
+  removed and the entry/identity mapping dropped; the session disappears from the list.
+- **Partial restore facts**: `sessionQuery` and `inspectSession` are optional. Without them
+  the restore list is empty and the feature is hidden, but the tab-mapping path still resumes;
+  a failed inspect only loses that row's label and boundary attribution (a session whose
+  header names its parent is still listed).
+- **Scan cost**: the response is capped at 20 rows and per-session facts are cached for 60 s;
+  a stale label is cheap, a stale scan is not.
+
 ## P1b (designed, not implemented)
 
 - Model picker for the side session.
 - Surfacing the side session's **approval prompts** in the panel (today the side session
   inherits the parent's approval policy; if that policy asks the human, the request has no
   answerer inside the panel).
-- Side-session history across a GUI restart (today: in-memory handles only).
 
 ## Non-goals
 

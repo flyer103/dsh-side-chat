@@ -72,7 +72,7 @@ Then **restart DSH**, open a session, and expand the right sidebar from the sess
 
 - Approval prompts are not shown inside the side-chat tab: the side session inherits the parent's approval policy, and if that policy asks a human, the side session waits. Use a non-interactive policy (for example `danger-full-access`) for side chats that must write files.
 - A closed tab cannot be restored: reopening the guide card or pressing **New side chat** starts a new side chat, whose agent is created on the next message.
-- P1b, designed but not implemented: model picker, surviving a GUI restart, approval rendering in the tab.
+- P1b, designed but not implemented: model picker, approval rendering in the tab.
 - `@` completion depends on the host reference providers: file/folder completion needs a
   file-reference provider and session completion needs DSH's session-reference service. The
   shipped web stack mounts both; one missing domain simply lists nothing, and with neither
