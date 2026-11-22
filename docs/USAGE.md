@@ -40,7 +40,7 @@ the one named here.
 
 ```bash
 dsh plugin --profile desktop add @flyer103/dsh-side-chat
-dsh plugin --profile desktop add @flyer103/dsh-side-chat@0.12.0   # pin a release
+dsh plugin --profile desktop add @flyer103/dsh-side-chat@0.13.0   # pin a release
 ```
 
 The recommended path. The published package carries both halves as plain files, so there is
@@ -67,14 +67,14 @@ This installs from the repository instead of the registry — use it for an unre
 or when the registry is unreachable; the same package is published on npm (see above). It
 needs the repository to be reachable with `git`. There is no build step and no `prepare`
 script, so no package build approval is needed. Pin a commit or a released tag when you need
-reproducibility: `github:flyer103/dsh-side-chat#<commit>` (or `#v0.12.0`).
+reproducibility: `github:flyer103/dsh-side-chat#<commit>` (or `#v0.13.0`).
 
 ### From a tarball
 
 ```bash
 cd /path/to/dsh-side-chat
-npm pack                       # writes flyer103-dsh-side-chat-0.12.0.tgz
-dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.12.0.tgz"
+npm pack                       # writes flyer103-dsh-side-chat-0.13.0.tgz
+dsh plugin --profile desktop add "$(pwd)/flyer103-dsh-side-chat-0.13.0.tgz"
 ```
 
 An `https:` tarball URL is accepted the same way.
