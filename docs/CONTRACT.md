@@ -171,6 +171,15 @@ the matching settlement commits: it emits `live: null` and then forwards that co
 event's `event` frame, in that order; an `end` frame with an `abandoned` outcome clears it
 too. A `: ping` comment is sent about every 15 s.
 
+The client watches for that ping: a stream that already delivered `hello` and then delivers
+no bytes at all for 45 s (three missed pings) is treated as a dead socket — the request is
+aborted, one catch-up `snapshot` runs, and the tab reconnects with the usual backoff. Without
+that deadline a silently dropped connection would keep the last `running` frame forever.
+A `snapshot` response and a lifecycle frame (`hello`, `status`) can also cross: a snapshot
+describes the moment the host handled it, so when a lifecycle frame arrives while a snapshot
+is in flight the client merges the snapshot's `entries` but keeps the frame's
+`running` / `status` / `live` — the newer observation wins.
+
 If the stream cannot open, the host answers a normal JSON 200 `{ ok: false, code, message }`
 instead — `not-found` for a session it does not own, `internal` for an unparsable body — so
 the client can fall back to polling. The client aborts the request when the tab becomes
@@ -268,6 +277,12 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   disabled when the turn has no process blocks, collapsed by default, and expanding it
   lists the turn's reasoning folds and tool blocks. Turns without a recorded `turn/start`
   (a snapshot that opens mid-turn) show no elapsed time.
+- An unsettled process node renders while its turn runs and the node already has process
+  blocks: the same row, labelled `Working…` (`process.working`), carrying the tool call it is
+  waiting on (the last `tool-call` block without a result, or `tool.fallbackName` when that
+  block has no name) and the elapsed time so far, re-labelled once a second. This row is what
+  keeps a long tool call from looking like an idle panel; it is not rendered on an idle panel,
+  and it takes the place of the thinking indicator.
 - Hide rows below the fork floor (`seq < inheritedEventCount`) and the injected boundary
   message (`source.kind === 'plugin:side-chat'`, or text starting with
   `Side conversation boundary.`).
@@ -278,7 +293,7 @@ and the tab's status-bar new-side-chat button each open a fresh instance.
   `assistant/message` replaces it; the client reconciles on the `live: null` frame (and
   defensively on a matching settlement `event`), issuing one snapshot catch-up so a
   settlement is never lost. The thinking indicator shows only while a turn runs with no
-  visible live blocks.
+  visible live blocks and no in-flight process row.
 - Composer: own textarea; `Enter` sends, `Shift+Enter` newline; send button becomes Stop
   while running; optimistic pending rows disappear when the same text echoes back from
   `entries`. Enter never submits while an input-method composition is in progress. The

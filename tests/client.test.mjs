@@ -291,6 +291,8 @@ function createRuntimeWith(fetchStub, options = {}) {
     document: null,
     pollRunningMs: 5,
     pollIdleMs: 5,
+    // Off by default so timer-count assertions only see the timer under test.
+    streamSilenceMs: 0,
     ...(options.config === undefined ? {} : options.config)
   })
   return { exports, scheduler, runtime }
@@ -990,22 +992,50 @@ test('foldEntries groups one turn\'s reasoning and tools into a single process n
   assert.deepEqual(nodes.slice(1).map((node) => node.blocks[0].text), ['first step', 'second step'])
 })
 
-test('a running turn hides its process row until the turn settles', () => {
-  const { bodyRegistration } = panelRenderer()
+test('a running turn shows its process row with the in-flight tool instead of a bare thinking indicator', () => {
+  const { bodyRegistration, props } = panelRenderer()
   const state = panelState({
     sessionId: 'side-1',
-    nodes: [{ kind: 'process', seq: 2, turn: 1, start: 1000, end: undefined, blocks: [{ kind: 'reasoning', text: 'thinking' }] }]
+    running: true,
+    nodes: [{
+      kind: 'process', seq: 2, turn: 1, start: 1000, end: undefined,
+      blocks: [
+        { kind: 'reasoning', text: 'thinking' },
+        { kind: 'tool-call', callId: 'c1', name: 'bash', argsRaw: '{}', result: null }
+      ]
+    }]
   })
-  let tree = bodyRegistration.component({
-    runtime: panelRuntime(state),
-    sessionId: 'main-1',
-    t: (key) => key,
-    useTabInfo: () => ({ tab: { visible: true } })
-  })
-  for (let depth = 0; depth < 3 && tree !== null && tree !== undefined && typeof tree.type === 'function'; depth += 1) tree = tree.type(tree.props)
+  const tree = renderPanel(bodyRegistration, props, state)
   const processElement = findElement(tree, (element) => typeof element.type === 'function'
     && element.props !== undefined && element.props.node !== undefined && element.props.node.kind === 'process')
-  assert.equal(processElement, undefined, 'no process row before turn/end')
+  assert.ok(processElement !== undefined, 'the running turn renders its process row')
+  assert.equal(processElement.props.running, true)
+  const rowTree = expandElement(processElement)
+  const label = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process-label')
+  assert.equal(label.children[0], 'process.working', 'the row reports that work is in progress')
+  const tool = findElement(rowTree, (element) => element.props !== undefined && element.props.className === 'sc-process-tool')
+  assert.equal(tool.children[0], 'bash', 'the row names the tool it is waiting on')
+  const elapsed = findElement(rowTree, (element) => element.props !== undefined && element.props.start === 1000)
+  assert.ok(elapsed !== undefined, 'the row shows a live duration from the turn start')
+  assert.equal(expandElement(elapsed).props.className, 'sc-process-elapsed')
+  const thinking = findElement(tree, (element) => element.props !== undefined && element.props.className === 'sc-thinking')
+  assert.equal(thinking, undefined, 'the working row replaces the thinking indicator')
+})
+
+test('a running turn without process blocks keeps the thinking indicator and an idle panel hides the row', () => {
+  const { bodyRegistration, props } = panelRenderer()
+  const runningTree = renderPanel(bodyRegistration, props, panelState({ sessionId: 'side-1', running: true }))
+  assert.ok(findElement(runningTree, (element) => element.props !== undefined && element.props.className === 'sc-thinking') !== undefined,
+    'nothing to report yet, so the thinking indicator stays')
+
+  const idleTree = renderPanel(bodyRegistration, props, panelState({
+    sessionId: 'side-1',
+    running: false,
+    nodes: [{ kind: 'process', seq: 2, turn: 1, start: 1000, end: undefined, blocks: [{ kind: 'reasoning', text: 'thinking' }] }]
+  }))
+  const processElement = findElement(idleTree, (element) => typeof element.type === 'function'
+    && element.props !== undefined && element.props.node !== undefined && element.props.node.kind === 'process')
+  assert.equal(processElement, undefined, 'an idle panel does not show an unsettled process row')
 })
 
 test('formatTurnDuration uses seconds and minutes like the main transcript', () => {
@@ -2130,6 +2160,88 @@ test('a silent stream falls back to polling after streamHelloMs instead of hangi
   assert.equal(state.streaming, false)
   assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1)
   assert.equal(scheduler.pending(), 1, 'polling takes over')
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('a stream that goes silent after hello reconnects instead of holding the running state', async () => {
+  const fetchStub = createStreamingFetchStub({ handlers: streamingHandlers() })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub, { config: { streamSilenceMs: 5 } })
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [],
+    live: null
+  }))
+  await flush()
+  assert.equal(runtime.getState('main-1').running, true)
+  assert.equal(scheduler.pending(), 1, 'the silence deadline is armed after hello')
+
+  fetchStub.streams[0].queue.push(': ping\n\n')
+  await flush()
+  assert.equal(scheduler.pending(), 1, 'a ping re-arms the same deadline instead of stacking timers')
+  assert.equal(fetchStub.streams[0].init.signal.aborted, false)
+
+  scheduler.runAll()
+  await flush()
+  assert.equal(fetchStub.streams[0].init.signal.aborted, true, 'the silent stream is dropped')
+  assert.equal(runtime.getState('main-1').streaming, false)
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1, 'it catches up by snapshot')
+  assert.equal(scheduler.pending(), 1, 'and reconnects with backoff')
+  runtime.setVisible('main-1', false)
+  await runtime.close('main-1')
+})
+
+test('a snapshot that resolves after an idle status frame does not resurrect running', async () => {
+  let resolveSnapshot
+  const snapshotGate = new Promise((resolve) => { resolveSnapshot = resolve })
+  const handlers = streamingHandlers({ snapshot: () => snapshotGate })
+  const fetchStub = createStreamingFetchStub({ handlers })
+  const { scheduler, runtime } = createRuntimeWith(fetchStub)
+  runtime.open('main-1')
+  runtime.setVisible('main-1', true)
+  await runtime.send('main-1', 'hi')
+  scheduler.runAll()
+  await flush()
+
+  fetchStub.streams[0].queue.push(sseFrame('hello', {
+    ok: true,
+    inheritedEventCount: 0,
+    status: 'running',
+    running: true,
+    lastError: null,
+    entries: [],
+    live: { revision: 1, activeAttempt: { attemptId: 'a1', turn: 1, step: 1, nextIndex: 1, blocks: [{ kind: 'text', text: 'partial' }] } }
+  }))
+  await flush()
+  fetchStub.streams[0].queue.push(sseFrame('live', { live: null }))
+  await flush()
+  assert.equal(fetchStub.calls.filter((call) => call.url === `${API_PREFIX}snapshot`).length, 1, 'the settled live attempt triggers a snapshot')
+
+  fetchStub.streams[0].queue.push(sseFrame('status', { status: 'idle', running: false }))
+  await flush()
+  resolveSnapshot({
+    ok: true,
+    inheritedEventCount: 0,
+    running: true,
+    status: 'running',
+    lastError: null,
+    entries: [],
+    live: null
+  })
+  await flush()
+  const state = runtime.getState('main-1')
+  assert.equal(state.running, false, 'the stale snapshot cannot overwrite the newer idle frame')
+  assert.equal(state.status, 'idle')
   runtime.setVisible('main-1', false)
   await runtime.close('main-1')
 })

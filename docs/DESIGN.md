@@ -56,8 +56,12 @@ Delta against the existing community plugins:
    stream cannot be established — no readable body, JSON refusal, or a transport that buffers
    the response — the tab degrades to the existing `snapshot` polling, which also carries the
    live attempt. Hiding the tab aborts the stream; showing it reconnects from the last seen
-   sequence with a fresh live baseline. Live state and streams are per side session, so
-   several tabs of one parent session stream independently.
+   sequence with a fresh live baseline. A tab that has seen `hello` and then receives no
+   bytes for 45 s — three missed `: ping` comments — treats the socket as dead and takes the
+   same reconnect path instead of holding the last `running` frame. A snapshot that resolves
+   after a lifecycle frame arrived is stale by construction, so it merges its entries but
+   keeps the frame's `running` / `status` / `live`. Live state and streams are per side
+   session, so several tabs of one parent session stream independently.
 10. **Usage dock**: a slim row under the composer — the same relationship as DSH's own
     composer dock — with total tokens, cache-hit percentage, and a context-occupancy ring
     plus percentage. Values are folded client-side from the committed events the tab already

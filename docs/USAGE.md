@@ -302,8 +302,10 @@ Unlike read-only side-chat plugins, this one is expected to change files:
   opens another side-chat tab in the same pane), the message list, the composer, and — once
   the side chat has usage data — the usage dock under the composer.
 - Messages: user bubbles with timestamps; assistant Markdown streamed token by token while
-  the turn runs (reasoning folded, tool calls folded with their arguments and results);
-  running/thinking indicator when no live text is visible yet; optimistic pending messages;
+  the turn runs (reasoning folded, tool calls folded with their arguments and results); a
+  `Working…` row naming the tool a running turn waits on and its elapsed time; the
+  running/thinking indicator only when neither live text nor in-flight work is visible yet;
+  optimistic pending messages;
   error banner. Markdown uses the shell's renderer (GFM tables, code fences with localized
   copy/wrap controls, footnotes) and only falls back to a reduced built-in renderer when the
   shell does not export `MarkdownText`; the fallback covers headings, lists, fences,
@@ -653,9 +655,17 @@ curl -s -X POST "<dsh-web-base-url>/side-chat/api/list" \
 **The side chat seems stuck.**
 
 It may be waiting for an approval its policy requires the human to answer (see the
-approval section), or a tool is still running. Press Stop to cancel the turn. Check that the
-tab is the active tab in an expanded right sidebar; a hidden tab deliberately stops live
-updates.
+approval section), or a tool is still running. A running turn shows a `Working…` row with the
+tool it is waiting on and the elapsed time, ticking once a second — a long command with a
+quiet row is work in progress, not a frozen panel; expand the row to read the tool arguments
+and output so far. A turn with no such row and no text yet is still thinking or calling the
+model. Press Stop to cancel the turn; a cancelled turn keeps the work it already produced.
+Check that the tab is the active tab in an expanded right sidebar; a hidden tab deliberately
+stops live updates. If the panel still reports a running turn after the host has finished
+one (for example after a laptop sleep dropped the connection), the tab recovers on its own:
+a stream that stays silent for 45 s is re-established and one snapshot catch-up reconciles
+the state, so a stuck indicator that survives more than about a minute means the turn really
+is still running on the host.
 
 **A refresh lost the side chat.**
 
